@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+Training script with FLOP-budget targeting.
+
+The key idea: instead of fixing iterations, we fix a compute budget (in FLOPs)
+and let the training run until that budget is exhausted. This makes experiments
+comparable across different model sizes.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from model import GPT, ModelConfig
+from data import load_char_data, get_batch
+
+
+def estimate_total_flops(model: GPT, n_tokens: int) -> float:
+    """Estimate total training FLOPs for processing n_tokens."""
+    return model.estimate_flops_per_token() * n_tokens
+
+
+def tokens_for_flop_budget(model: GPT, flop_budget: float) -> int:
+    """How many tokens can we train on with this FLOP budget?"""
+    flops_per_token = model.estimate_flops_per_token()
+    return int(flop_budget / flops_per_token)
+
+
+@torch.no_grad()
+def estimate_loss(model: GPT, train_data, val_data, batch_size: int, block_size: int, device: str, eval_iters: int = 50):
+    model.eval()
+    out = {}
+    for split, data in [("train", train_data), ("val", val_data)]:
+        losses = []
+        for _ in range(eval_iters):
+            x, y = get_batch(data.data, batch_size, block_size, device)
+            _, loss = model(x, y)
+            losses.append(loss.item())
+        out[split] = np.mean(losses)
+    model.train()
+    return out
+
+
+def get_lr(step: int, warmup_steps: int, max_steps: int, max_lr: float, min_lr: float) -> float:
+    """Cosine learning rate schedule with warmup."""
+    if step < warmup_steps:
+        return max_lr * (step + 1) / warmup_steps
+    if step >= max_steps:
+        return min_lr
+    decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+
+    # Data
+    ap.add_argument("--data_dir", type=str, default="data/shakespeare", help="Directory with train.bin, val.bin, meta.json")
+
+    # Model
+    ap.add_argument("--n_layer", type=int, default=4)
+    ap.add_argument("--n_head", type=int, default=4)
+    ap.add_argument("--n_embd", type=int, default=128)
+    ap.add_argument("--block_size", type=int, default=256)
+    ap.add_argument("--dropout", type=float, default=0.0)
+
+    # Training
+    ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--learning_rate", type=float, default=1e-3)
+    ap.add_argument("--min_lr", type=float, default=1e-4)
+    ap.add_argument("--weight_decay", type=float, default=0.1)
+    ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--warmup_frac", type=float, default=0.1, help="Fraction of training for warmup")
+
+    # FLOP budget (the key parameter!)
+    ap.add_argument("--flop_budget", type=float, default=1e15, help="Total training FLOPs budget")
+    ap.add_argument("--max_iters", type=int, default=None, help="Override: max iterations (ignores flop_budget)")
+
+    # Eval & logging
+    ap.add_argument("--eval_interval", type=int, default=250)
+    ap.add_argument("--eval_iters", type=int, default=50)
+    ap.add_argument("--log_interval", type=int, default=50)
+    ap.add_argument("--out_dir", type=str, default="out")
+
+    # Device
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--seed", type=int, default=1337)
+
+    args = ap.parse_args()
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    # Load data
+    train_ds, val_ds = load_char_data(args.data_dir)
+    print(f"Loaded data: {len(train_ds):,} train chars, {len(val_ds):,} val chars, vocab_size={train_ds.vocab_size}")
+
+    # Build model
+    cfg = ModelConfig(
+        vocab_size=train_ds.vocab_size,
+        block_size=args.block_size,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_embd=args.n_embd,
+        dropout=args.dropout,
+    )
+    model = GPT(cfg).to(args.device)
+    n_params = model.num_params()
+    print(f"Model: {n_params:,} parameters ({n_params/1e6:.2f}M)")
+
+    # Compute training schedule from FLOP budget
+    tokens_per_iter = args.batch_size * args.block_size
+    flops_per_iter = model.estimate_flops_per_token() * tokens_per_iter
+
+    if args.max_iters is not None:
+        max_iters = args.max_iters
+        total_flops = flops_per_iter * max_iters
+    else:
+        max_iters = int(args.flop_budget / flops_per_iter)
+        total_flops = args.flop_budget
+
+    total_tokens = max_iters * tokens_per_iter
+    warmup_iters = int(args.warmup_frac * max_iters)
+
+    print(f"\n=== Training Plan ===")
+    print(f"FLOP budget: {total_flops:.2e}")
+    print(f"FLOPs per iter: {flops_per_iter:.2e}")
+    print(f"Max iterations: {max_iters:,}")
+    print(f"Total tokens: {total_tokens:,} ({total_tokens/1e6:.1f}M)")
+    print(f"Warmup iters: {warmup_iters:,}")
+    print(f"======================\n")
+
+    # Optimizer
+    optimizer = model.configure_optim(
+        weight_decay=args.weight_decay,
+        learning_rate=args.learning_rate,
+    )
+
+    # Output directory
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Training loop
+    t0 = time.time()
+    best_val_loss = float("inf")
+    flops_used = 0
+
+    for it in range(1, max_iters + 1):
+        # Learning rate schedule
+        lr = get_lr(it - 1, warmup_iters, max_iters, args.learning_rate, args.min_lr)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+
+        # Eval
+        if it == 1 or it % args.eval_interval == 0 or it == max_iters:
+            losses = estimate_loss(model, train_ds, val_ds, args.batch_size, args.block_size, args.device, args.eval_iters)
+            print(f"[iter {it:5d}] train_loss={losses['train']:.4f} val_loss={losses['val']:.4f} lr={lr:.2e} flops={flops_used:.2e}")
+
+            if losses["val"] < best_val_loss:
+                best_val_loss = losses["val"]
+                ckpt = {
+                    "model": model.state_dict(),
+                    "config": cfg.__dict__,
+                    "iter": it,
+                    "best_val_loss": best_val_loss,
+                    "flops_used": flops_used,
+                }
+                torch.save(ckpt, os.path.join(args.out_dir, "best.pt"))
+
+        # Training step
+        x, y = get_batch(train_ds.data, args.batch_size, args.block_size, args.device)
+        _, loss = model(x, y)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        optimizer.step()
+
+        flops_used += flops_per_iter
+
+        # Logging
+        if it % args.log_interval == 0:
+            dt = time.time() - t0
+            t0 = time.time()
+            tokens_per_sec = tokens_per_iter * args.log_interval / dt
+            print(f"  iter {it:5d} | loss {loss.item():.4f} | {tokens_per_sec:.0f} tok/s | {dt*1000/args.log_interval:.1f} ms/iter")
+
+    # Final generation sample
+    print("\n=== Sample Generation ===")
+    model.eval()
+    prompt = "ROMEO:"
+    ids = train_ds.encode(prompt)
+    x = torch.tensor(ids, dtype=torch.long, device=args.device).unsqueeze(0)
+    with torch.no_grad():
+        out = model.generate(x, max_new_tokens=200, temperature=0.8)
+    print(train_ds.decode(out[0].tolist()))
+
+    # Save final checkpoint
+    final_ckpt = {
+        "model": model.state_dict(),
+        "config": cfg.__dict__,
+        "iter": max_iters,
+        "final_val_loss": losses["val"],
+        "flops_used": flops_used,
+    }
+    torch.save(final_ckpt, os.path.join(args.out_dir, "final.pt"))
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+
+
+if __name__ == "__main__":
+    main()
