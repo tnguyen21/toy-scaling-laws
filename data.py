@@ -171,6 +171,121 @@ prepare_char_data = prepare_data
 load_char_data = load_data
 
 
+def prepare_fineweb(
+    out_dir: str,
+    num_docs: int = 10_000,
+    encoding: str = "gpt2",
+    val_fraction: float = 0.01,
+    dataset: str = "HuggingFaceFW/fineweb",
+    name: str = "sample-10BT",
+    seed: int = 1337,
+) -> tuple[str, str, dict]:
+    """
+    Prepare FineWeb dataset (streaming from HuggingFace).
+
+    Args:
+        out_dir: Output directory for train.bin, val.bin, meta.json
+        num_docs: Number of documents to download
+        encoding: Tokenizer encoding (gpt2, cl100k_base, etc.)
+        val_fraction: Fraction of documents for validation
+        dataset: HuggingFace dataset name
+        name: Dataset config name
+        seed: Random seed for train/val split
+
+    Returns:
+        Tuple of (train_path, val_path, metadata dict)
+    """
+    import hashlib
+    import os
+
+    from tqdm import tqdm
+
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise RuntimeError("datasets library required: pip install datasets")
+
+    import tiktoken
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup tokenizer
+    enc = tiktoken.get_encoding(encoding)
+    vocab_size = enc.n_vocab
+    dtype = np.uint32  # BPE vocabs can be > 65535
+
+    train_path = out_dir / "train.bin"
+    val_path = out_dir / "val.bin"
+
+    def _is_val_example(ex: dict, text: str) -> bool:
+        """Deterministic train/val split based on document hash."""
+        if val_fraction <= 0.0:
+            return False
+        if val_fraction >= 1.0:
+            return True
+
+        # Use stable identifier if available
+        key = None
+        for field in ("id", "document_id", "doc_id", "url"):
+            if field in ex:
+                key = ex[field]
+                break
+        if key is None:
+            key = text
+
+        h = hashlib.blake2b(digest_size=8)
+        h.update(str(seed).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(key).encode("utf-8", errors="ignore"))
+        bucket = int.from_bytes(h.digest(), "big")
+        threshold = int(val_fraction * (1 << 64))
+        return bucket < threshold
+
+    # Stream dataset
+    print(f"Streaming {num_docs:,} documents from {dataset}/{name}...")
+    ds = load_dataset(dataset, name, split="train", streaming=True)
+
+    train_tokens = 0
+    val_tokens = 0
+
+    with open(train_path, "wb") as f_train, open(val_path, "wb") as f_val:
+        it = iter(ds)
+        for _ in tqdm(range(num_docs), desc="docs"):
+            try:
+                ex = next(it)
+            except StopIteration:
+                print(f"Warning: dataset exhausted after {_} documents")
+                break
+
+            text = ex.get("text", "")
+            if not isinstance(text, str) or not text:
+                continue
+
+            ids = enc.encode(text)
+            if not ids:
+                continue
+
+            arr = np.array(ids, dtype=dtype)
+            if _is_val_example(ex, text):
+                f_val.write(arr.tobytes())
+                val_tokens += len(ids)
+            else:
+                f_train.write(arr.tobytes())
+                train_tokens += len(ids)
+
+    meta = {
+        "encoding": encoding,
+        "vocab_size": vocab_size,
+        "train_tokens": train_tokens,
+        "val_tokens": val_tokens,
+        "source": f"{dataset}/{name}",
+        "num_docs": num_docs,
+    }
+
+    return str(train_path), str(val_path), meta
+
+
 def get_batch(
     data: np.memmap,
     batch_size: int,
@@ -202,9 +317,29 @@ if __name__ == "__main__":
         help="Encoding: 'char' for character-level, or tiktoken name (gpt2, r50k_base, cl100k_base, etc.)",
     )
     ap.add_argument("--download_shakespeare", action="store_true", help="Download tiny shakespeare")
+
+    # FineWeb options
+    ap.add_argument("--download_fineweb", action="store_true", help="Download FineWeb dataset (requires datasets library)")
+    ap.add_argument("--num_docs", type=int, default=10_000, help="Number of FineWeb documents to download")
+    ap.add_argument("--fineweb_name", type=str, default="sample-10BT", help="FineWeb config name")
+
     args = ap.parse_args()
 
-    if args.download_shakespeare:
+    if args.download_fineweb:
+        # FineWeb always uses BPE encoding
+        if args.encoding == "char":
+            args.encoding = "gpt2"
+            print("Note: FineWeb uses BPE encoding, defaulting to gpt2")
+
+        train_path, val_path, meta = prepare_fineweb(
+            out_dir=args.out_dir,
+            num_docs=args.num_docs,
+            encoding=args.encoding,
+            val_fraction=args.val_fraction,
+            name=args.fineweb_name,
+        )
+
+    elif args.download_shakespeare:
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
         input_path = Path(args.out_dir) / "input.txt"
         input_path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,15 +347,23 @@ if __name__ == "__main__":
         urllib.request.urlretrieve(url, input_path)
         args.input = str(input_path)
 
-    if not args.input:
-        raise ValueError("Must provide --input or --download_shakespeare")
+        train_path, val_path, meta = prepare_data(
+            args.input,
+            args.out_dir,
+            encoding=args.encoding,
+            val_fraction=args.val_fraction,
+        )
 
-    train_path, val_path, meta = prepare_data(
-        args.input,
-        args.out_dir,
-        encoding=args.encoding,
-        val_fraction=args.val_fraction,
-    )
+    elif args.input:
+        train_path, val_path, meta = prepare_data(
+            args.input,
+            args.out_dir,
+            encoding=args.encoding,
+            val_fraction=args.val_fraction,
+        )
+
+    else:
+        raise ValueError("Must provide --input, --download_shakespeare, or --download_fineweb")
 
     meta_path = Path(args.out_dir) / "meta.json"
     with open(meta_path, "w") as f:
