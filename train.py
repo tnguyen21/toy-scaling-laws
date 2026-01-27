@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from model import GPT, ModelConfig
-from data import load_char_data, get_batch
+from data import load_data, get_batch
 
 
 def estimate_total_flops(model: GPT, n_tokens: int) -> float:
@@ -34,7 +34,9 @@ def tokens_for_flop_budget(model: GPT, flop_budget: float) -> int:
 
 
 @torch.no_grad()
-def estimate_loss(model: GPT, train_data, val_data, batch_size: int, block_size: int, device: str, eval_iters: int = 50):
+def estimate_loss(
+    model: GPT, train_data, val_data, batch_size: int, block_size: int, device: str, eval_iters: int = 50
+):
     model.eval()
     out = {}
     for split, data in [("train", train_data), ("val", val_data)]:
@@ -111,7 +113,9 @@ def main():
     ap = argparse.ArgumentParser()
 
     # Data
-    ap.add_argument("--data_dir", type=str, default="data/shakespeare", help="Directory with train.bin, val.bin, meta.json")
+    ap.add_argument(
+        "--data_dir", type=str, default="data/shakespeare", help="Directory with train.bin, val.bin, meta.json"
+    )
 
     # Model
     ap.add_argument("--n_layer", type=int, default=4)
@@ -148,7 +152,7 @@ def main():
     np.random.seed(args.seed)
 
     # Load data
-    train_ds, val_ds = load_char_data(args.data_dir)
+    train_ds, val_ds = load_data(args.data_dir)
     print(f"Loaded data: {len(train_ds):,} train chars, {len(val_ds):,} val chars, vocab_size={train_ds.vocab_size}")
 
     # Build model
@@ -217,8 +221,12 @@ def main():
 
         # Eval
         if it == 1 or it % args.eval_interval == 0 or it == max_iters:
-            losses = estimate_loss(model, train_ds, val_ds, args.batch_size, args.block_size, args.device, args.eval_iters)
-            print(f"[iter {it:5d}] train_loss={losses['train']:.4f} val_loss={losses['val']:.4f} lr={lr:.2e} flops={flops_used:.2e}")
+            losses = estimate_loss(
+                model, train_ds, val_ds, args.batch_size, args.block_size, args.device, args.eval_iters
+            )
+            print(
+                f"[iter {it:5d}] train_loss={losses['train']:.4f} val_loss={losses['val']:.4f} lr={lr:.2e} flops={flops_used:.2e}"
+            )
 
             # Record metrics for plotting
             history["iter"].append(it)
@@ -255,7 +263,9 @@ def main():
             dt = time.time() - t0
             t0 = time.time()
             tokens_per_sec = tokens_per_iter * args.log_interval / dt
-            print(f"  iter {it:5d} | loss {loss.item():.4f} | {tokens_per_sec:.0f} tok/s | {dt * 1000 / args.log_interval:.1f} ms/iter")
+            print(
+                f"  iter {it:5d} | loss {loss.item():.4f} | {tokens_per_sec:.0f} tok/s | {dt * 1000 / args.log_interval:.1f} ms/iter"
+            )
 
     # Plot training progress
     if len(history["iter"]) > 1:
