@@ -6,15 +6,15 @@ The key idea: instead of fixing iterations, we fix a compute budget (in FLOPs)
 and let the training run until that budget is exhausted. This makes experiments
 comparable across different model sizes.
 """
+
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import time
-from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -57,6 +57,54 @@ def get_lr(step: int, warmup_steps: int, max_steps: int, max_lr: float, min_lr: 
     decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
+
+
+def plot_training_progress(history: dict, out_dir: str):
+    """Plot training curves and save to files."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Loss vs iteration
+    ax = axes[0, 0]
+    ax.plot(history["iter"], history["train_loss"], label="train")
+    ax.plot(history["iter"], history["val_loss"], label="val")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Loss")
+    ax.set_title("Loss vs Iteration")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Loss vs FLOPs (scaling law plot)
+    ax = axes[0, 1]
+    ax.plot(history["flops"], history["train_loss"], label="train")
+    ax.plot(history["flops"], history["val_loss"], label="val")
+    ax.set_xlabel("FLOPs")
+    ax.set_ylabel("Loss")
+    ax.set_title("Loss vs Compute (Scaling Law)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.ticklabel_format(style="scientific", axis="x", scilimits=(0, 0))
+
+    # Learning rate schedule
+    ax = axes[1, 0]
+    ax.plot(history["iter"], history["lr"])
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Learning Rate")
+    ax.set_title("Learning Rate Schedule")
+    ax.grid(True, alpha=0.3)
+
+    # Log-scale loss vs FLOPs
+    ax = axes[1, 1]
+    ax.loglog(history["flops"], history["val_loss"], "o-", label="val_loss")
+    ax.set_xlabel("FLOPs")
+    ax.set_ylabel("Loss")
+    ax.set_title("Loss vs Compute (Log-Log)")
+    ax.legend()
+    ax.grid(True, alpha=0.3, which="both")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "training_progress.png"), dpi=150)
+    plt.close()
+    print(f"Saved training plots to {out_dir}/training_progress.png")
 
 
 def main():
@@ -114,7 +162,7 @@ def main():
     )
     model = GPT(cfg).to(args.device)
     n_params = model.num_params()
-    print(f"Model: {n_params:,} parameters ({n_params/1e6:.2f}M)")
+    print(f"Model: {n_params:,} parameters ({n_params / 1e6:.2f}M)")
 
     # Compute training schedule from FLOP budget
     tokens_per_iter = args.batch_size * args.block_size
@@ -130,13 +178,13 @@ def main():
     total_tokens = max_iters * tokens_per_iter
     warmup_iters = int(args.warmup_frac * max_iters)
 
-    print(f"\n=== Training Plan ===")
+    print("\n=== Training Plan ===")
     print(f"FLOP budget: {total_flops:.2e}")
     print(f"FLOPs per iter: {flops_per_iter:.2e}")
     print(f"Max iterations: {max_iters:,}")
-    print(f"Total tokens: {total_tokens:,} ({total_tokens/1e6:.1f}M)")
+    print(f"Total tokens: {total_tokens:,} ({total_tokens / 1e6:.1f}M)")
     print(f"Warmup iters: {warmup_iters:,}")
-    print(f"======================\n")
+    print("======================\n")
 
     # Optimizer
     optimizer = model.configure_optim(
@@ -146,6 +194,15 @@ def main():
 
     # Output directory
     os.makedirs(args.out_dir, exist_ok=True)
+
+    # Metrics history for plotting
+    history = {
+        "iter": [],
+        "train_loss": [],
+        "val_loss": [],
+        "lr": [],
+        "flops": [],
+    }
 
     # Training loop
     t0 = time.time()
@@ -162,6 +219,13 @@ def main():
         if it == 1 or it % args.eval_interval == 0 or it == max_iters:
             losses = estimate_loss(model, train_ds, val_ds, args.batch_size, args.block_size, args.device, args.eval_iters)
             print(f"[iter {it:5d}] train_loss={losses['train']:.4f} val_loss={losses['val']:.4f} lr={lr:.2e} flops={flops_used:.2e}")
+
+            # Record metrics for plotting
+            history["iter"].append(it)
+            history["train_loss"].append(losses["train"])
+            history["val_loss"].append(losses["val"])
+            history["lr"].append(lr)
+            history["flops"].append(flops_used)
 
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
@@ -191,7 +255,11 @@ def main():
             dt = time.time() - t0
             t0 = time.time()
             tokens_per_sec = tokens_per_iter * args.log_interval / dt
-            print(f"  iter {it:5d} | loss {loss.item():.4f} | {tokens_per_sec:.0f} tok/s | {dt*1000/args.log_interval:.1f} ms/iter")
+            print(f"  iter {it:5d} | loss {loss.item():.4f} | {tokens_per_sec:.0f} tok/s | {dt * 1000 / args.log_interval:.1f} ms/iter")
+
+    # Plot training progress
+    if len(history["iter"]) > 1:
+        plot_training_progress(history, args.out_dir)
 
     # Final generation sample
     print("\n=== Sample Generation ===")
