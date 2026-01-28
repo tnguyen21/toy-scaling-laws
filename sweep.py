@@ -328,18 +328,14 @@ def main():
     print(f"n_embds: {n_embds}")
     print(f"n_layers: {n_layers}")
 
-    # Load data
     train_ds, val_ds = load_data(args.data_dir)
     print(f"Loaded data: {len(train_ds):,} train tokens, vocab_size={train_ds.vocab_size}")
 
-    # Output directory
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # Results tracking
     all_results: list[SweepResult] = []
     all_checkpoints: dict[tuple[int, int], list[dict]] = {}
 
-    # CSV file for results
     csv_path = os.path.join(args.out_dir, "results.csv")
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
@@ -349,7 +345,6 @@ def main():
         "final_train_loss", "final_val_loss", "best_val_loss", "train_time_sec"
     ])
 
-    # Run sweep
     total_runs = len(flop_budgets) * len(n_embds)
     run_idx = 0
 
@@ -383,7 +378,6 @@ def main():
                 all_checkpoints[key] = []
             all_checkpoints[key].extend(checkpoints)
 
-            # Write to CSV
             csv_writer.writerow([
                 result.flop_budget, result.n_embd, result.n_layer, result.n_head,
                 result.n_params, result.flops_used, result.tokens_trained, result.num_iters,
@@ -398,10 +392,8 @@ def main():
     csv_file.close()
     print(f"\nResults saved to {csv_path}")
 
-    # Plot results
     plot_scaling_curves(all_results, all_checkpoints, args.out_dir)
 
-    # Print summary table
     print("\n" + "="*100)
     print("SUMMARY")
     print("="*100)
