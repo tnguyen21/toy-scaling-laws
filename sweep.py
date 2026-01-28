@@ -7,25 +7,32 @@ revealing the "compute-optimal frontier" where larger models reach lower loss bu
 
 Usage:
     python sweep.py --data_dir data/shakespeare
+    python sweep.py --data_dir data/shakespeare --flop_budgets 1e12 3e12 1e13 --n_embds 32 64 128 256
 
-    # Tiny test run (CPU-friendly)
-    python sweep.py --data_dir data/shakespeare --preset tiny
+Example configs:
 
-    # Custom sweep
-    python sweep.py --data_dir data/shakespeare \
-        --flop_budgets 1e12 3e12 1e13 \
-        --n_embds 32 64 128 256
+    # Tiny: for CPU testing, ~10K-100K params, runs in minutes
+    # flop_budgets: [1e10, 3e10, 1e11, 3e11]
+    # n_embds: [16, 32, 48, 64]
+    # n_layers: [1, 2, 3, 4]
+    # batch_size: 32, block_size: 64, eval_iters: 20
+
+    # Large: ~60M-240M params
+    # FLOP budgets span 1 order of magnitude for visible scaling curves
+    # Model sizes: d=640 (~59M), d=768 (~85M), d=896 (~116M), d=1024 (~151M), d=1280 (~236M)
+    # flop_budgets: [3e16, 1e17, 3e17]
+    # n_embds: [640, 768, 896, 1024, 1280]
+    # n_layers: [6, 6, 6, 6, 6]
+    # batch_size: 64, block_size: 1024, eval_iters: 100
 """
 from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,53 +40,6 @@ import torch
 
 from data import load_data, get_batch
 from model import GPT, ModelConfig
-
-
-# =============================================================================
-# Presets for different compute scales
-# =============================================================================
-
-PRESETS = {
-    # Tiny: for CPU testing, ~10K-100K params, runs in minutes
-    "tiny": {
-        "flop_budgets": [1e10, 3e10, 1e11, 3e11],
-        "n_embds": [16, 32, 48, 64],
-        "n_layers": [1, 2, 3, 4],
-        "batch_size": 32,
-        "block_size": 64,
-        "eval_iters": 20,
-    },
-    # Small: for GPU testing, ~100K-1M params
-    "small": {
-        "flop_budgets": [1e12, 3e12, 1e13, 3e13],
-        "n_embds": [64, 96, 128, 192],
-        "n_layers": [2, 3, 4, 6],
-        "batch_size": 64,
-        "block_size": 128,
-        "eval_iters": 50,
-    },
-    # Medium: ~1M-10M params
-    "medium": {
-        "flop_budgets": [1e14, 3e14, 1e15, 3e15],
-        "n_embds": [128, 192, 256, 384],
-        "n_layers": [4, 6, 8, 12],
-        "batch_size": 64,
-        "block_size": 256,
-        "eval_iters": 50,
-    },
-    # Large: ~60M-240M params, "goldilocks" preset for ~10k max iters
-    # FLOP budgets span 1 order of magnitude for visible scaling curves
-    # Model sizes: d=640 (~59M), d=768 (~85M), d=896 (~116M), d=1024 (~151M), d=1280 (~236M)
-    # Iteration range: ~320 (largest model, lowest budget) to ~13k (smallest model, highest budget)
-    "large": {
-        "flop_budgets": [3e16, 1e17, 3e17],
-        "n_embds": [640, 768, 896, 1024, 1280],
-        "n_layers": [6, 6, 6, 6, 6],
-        "batch_size": 64,
-        "block_size": 1024,
-        "eval_iters": 100,
-    },
-}
 
 
 @dataclass
@@ -192,8 +152,7 @@ def train_model(
     flops_used = 0
     checkpoints = []  # For plotting loss curves
 
-    # Eval every ~10% of training or every 50 iters, whichever is more frequent
-    eval_interval = max(1, min(50, max_iters // 10))
+    eval_interval = max(1, max_iters // 10)
 
     for it in range(1, max_iters + 1):
         lr = get_lr(it - 1, warmup_iters, max_iters, learning_rate, min_lr)
@@ -348,33 +307,21 @@ def main():
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=1337)
 
-    # Preset or custom config
-    ap.add_argument("--preset", type=str, choices=list(PRESETS.keys()), help="Use preset config")
-    ap.add_argument("--flop_budgets", type=float, nargs="+", help="FLOP budgets to sweep")
-    ap.add_argument("--n_embds", type=int, nargs="+", help="Embedding dimensions to sweep")
-    ap.add_argument("--n_layers", type=int, nargs="+", help="Layer counts to sweep")
+    ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e12, 3e12, 1e13], help="FLOP budgets to sweep")
+    ap.add_argument("--n_embds", type=int, nargs="+", default=[64, 128, 256], help="Embedding dimensions to sweep")
+    ap.add_argument("--n_layers", type=int, nargs="+", default=[2, 4, 6], help="Layer counts to sweep")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--block_size", type=int, default=128)
     ap.add_argument("--eval_iters", type=int, default=50)
 
     args = ap.parse_args()
 
-    # Load preset or use custom config
-    if args.preset:
-        preset = PRESETS[args.preset]
-        flop_budgets = preset["flop_budgets"]
-        n_embds = preset["n_embds"]
-        n_layers = preset["n_layers"]
-        batch_size = preset["batch_size"]
-        block_size = preset["block_size"]
-        eval_iters = preset["eval_iters"]
-    else:
-        flop_budgets = args.flop_budgets or [1e12, 3e12, 1e13]
-        n_embds = args.n_embds or [64, 128, 256]
-        n_layers = args.n_layers or [2, 4, 6]
-        batch_size = args.batch_size
-        block_size = args.block_size
-        eval_iters = args.eval_iters
+    flop_budgets = args.flop_budgets
+    n_embds = args.n_embds
+    n_layers = args.n_layers
+    batch_size = args.batch_size
+    block_size = args.block_size
+    eval_iters = args.eval_iters
 
     print(f"Device: {args.device}")
     print(f"FLOP budgets: {flop_budgets}")
