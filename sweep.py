@@ -67,17 +67,16 @@ PRESETS = {
         "block_size": 256,
         "eval_iters": 50,
     },
-    # Large: ~5M-60M params, designed for ~10 tokens/param (near Chinchilla-optimal)
-    # Budgets chosen so that at 3e17 FLOPs:
-    #   - smallest (5M) is overtrained (~60 tok/param)
-    #   - largest (60M) is near-optimal (~5-10 tok/param)
-    # This should produce visible crossings where larger models beat smaller ones
+    # Large: ~60M-240M params, "goldilocks" preset for ~10k max iters
+    # FLOP budgets span 1 order of magnitude for visible scaling curves
+    # Model sizes: d=640 (~59M), d=768 (~85M), d=896 (~116M), d=1024 (~151M), d=1280 (~236M)
+    # Iteration range: ~320 (largest model, lowest budget) to ~13k (smallest model, highest budget)
     "large": {
-        "flop_budgets": [3e16, 1e17, 3e17, 1e18],
-        "n_embds": [192, 256, 384, 512],
-        "n_layers": [4, 6, 8, 12],
+        "flop_budgets": [3e16, 1e17, 3e17],
+        "n_embds": [640, 768, 896, 1024, 1280],
+        "n_layers": [6, 6, 6, 6, 6],
         "batch_size": 64,
-        "block_size": 512,
+        "block_size": 1024,
         "eval_iters": 100,
     },
 }
