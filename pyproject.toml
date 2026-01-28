@@ -1,5 +1,5 @@
 [project]
-name = "baby-scaling-laws"
+name = "toy-scaling-laws"
 version = "0.0.1"
 description = "Minimal transformer for exploring scaling laws at character level"
 requires-python = ">=3.10"
