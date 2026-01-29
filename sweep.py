@@ -25,6 +25,7 @@ Example configs:
     # n_layers: [6, 6, 6, 6, 6]
     # batch_size: 64, block_size: 1024, eval_iters: 100
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,6 +46,7 @@ from model import GPT, ModelConfig
 @dataclass
 class SweepResult:
     """Result from a single training run."""
+
     n_embd: int
     n_layer: int
     n_head: int
@@ -165,12 +167,14 @@ def train_model(
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
 
-            checkpoints.append({
-                "iter": it,
-                "flops": flops_used,
-                "train_loss": losses["train"],
-                "val_loss": losses["val"],
-            })
+            checkpoints.append(
+                {
+                    "iter": it,
+                    "flops": flops_used,
+                    "train_loss": losses["train"],
+                    "val_loss": losses["val"],
+                }
+            )
 
         # Training step
         x, y = get_batch(train_ds.data, batch_size, block_size, device)
@@ -230,16 +234,15 @@ def plot_scaling_curves(
         cfg = (n_embd, n_layer, n_params)
         color = config_to_color.get(cfg, "gray")
 
-        flops = [c["flops"] for c in checkpoints]
-        val_loss = [c["val_loss"] for c in checkpoints]
-
-        # Skip first point if flops=0 (for log scale)
-        if flops[0] == 0:
-            flops = flops[1:]
-            val_loss = val_loss[1:]
+        # Filter out zero-flop points (recorded at iteration 1 before any training)
+        # These cause horizontal lines on log-scale plots
+        filtered = [(c["flops"], c["val_loss"]) for c in checkpoints if c["flops"] > 0]
+        if not filtered:
+            continue
+        flops, val_loss = zip(*filtered)
 
         if flops:
-            label = f"d{n_embd}_L{n_layer} ({n_params//1000}K)"
+            label = f"d{n_embd}_L{n_layer} ({n_params // 1000}K)"
             ax.plot(flops, val_loss, "-", color=color, label=label, alpha=0.8)
             ax.scatter([flops[-1]], [val_loss[-1]], color=color, s=50, zorder=5)
 
@@ -252,7 +255,7 @@ def plot_scaling_curves(
 
     # Plot 2: Final loss vs FLOPs (the scaling law plot)
     ax = axes[1]
-    for (n_embd, n_layer, n_params) in unique_configs:
+    for n_embd, n_layer, n_params in unique_configs:
         results = [r for r in all_results if r.n_embd == n_embd and r.n_layer == n_layer]
         results.sort(key=lambda r: r.flops_used)
 
@@ -260,7 +263,7 @@ def plot_scaling_curves(
         losses = [r.best_val_loss for r in results]
 
         color = config_to_color[(n_embd, n_layer, n_params)]
-        label = f"d{n_embd}_L{n_layer} ({n_params//1000}K)"
+        label = f"d{n_embd}_L{n_layer} ({n_params // 1000}K)"
         ax.plot(flops, losses, "o-", color=color, label=label, markersize=8)
 
     ax.set_xlabel("Training FLOPs")
@@ -277,7 +280,7 @@ def plot_scaling_curves(
 
     # Additional plot: log-log to see power law
     fig, ax = plt.subplots(figsize=(8, 6))
-    for (n_embd, n_layer, n_params) in unique_configs:
+    for n_embd, n_layer, n_params in unique_configs:
         results = [r for r in all_results if r.n_embd == n_embd and r.n_layer == n_layer]
         results.sort(key=lambda r: r.flops_used)
 
@@ -285,7 +288,7 @@ def plot_scaling_curves(
         losses = [r.best_val_loss for r in results]
 
         color = config_to_color[(n_embd, n_layer, n_params)]
-        label = f"d{n_embd}_L{n_layer} ({n_params//1000}K)"
+        label = f"d{n_embd}_L{n_layer} ({n_params // 1000}K)"
         ax.loglog(flops, losses, "o-", color=color, label=label, markersize=8)
 
     ax.set_xlabel("Training FLOPs")
@@ -339,19 +342,31 @@ def main():
     csv_path = os.path.join(args.out_dir, "results.csv")
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow([
-        "flop_budget", "n_embd", "n_layer", "n_head", "n_params",
-        "flops_used", "tokens_trained", "num_iters", "tokens_per_param",
-        "final_train_loss", "final_val_loss", "best_val_loss", "train_time_sec"
-    ])
+    csv_writer.writerow(
+        [
+            "flop_budget",
+            "n_embd",
+            "n_layer",
+            "n_head",
+            "n_params",
+            "flops_used",
+            "tokens_trained",
+            "num_iters",
+            "tokens_per_param",
+            "final_train_loss",
+            "final_val_loss",
+            "best_val_loss",
+            "train_time_sec",
+        ]
+    )
 
     total_runs = len(flop_budgets) * len(n_embds)
     run_idx = 0
 
     for flop_budget in flop_budgets:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"FLOP Budget: {flop_budget:.2e}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         for n_embd, n_layer in zip(n_embds, n_layers):
             run_idx += 1
@@ -378,13 +393,23 @@ def main():
                 all_checkpoints[key] = []
             all_checkpoints[key].extend(checkpoints)
 
-            csv_writer.writerow([
-                result.flop_budget, result.n_embd, result.n_layer, result.n_head,
-                result.n_params, result.flops_used, result.tokens_trained, result.num_iters,
-                f"{result.tokens_per_param:.1f}",
-                result.final_train_loss, result.final_val_loss, result.best_val_loss,
-                result.train_time_sec
-            ])
+            csv_writer.writerow(
+                [
+                    result.flop_budget,
+                    result.n_embd,
+                    result.n_layer,
+                    result.n_head,
+                    result.n_params,
+                    result.flops_used,
+                    result.tokens_trained,
+                    result.num_iters,
+                    f"{result.tokens_per_param:.1f}",
+                    result.final_train_loss,
+                    result.final_val_loss,
+                    result.best_val_loss,
+                    result.train_time_sec,
+                ]
+            )
             csv_file.flush()
 
             print(f"  -> val_loss={result.best_val_loss:.4f}, tok/param={result.tokens_per_param:.1f}, time={result.train_time_sec:.1f}s")
@@ -394,11 +419,11 @@ def main():
 
     plot_scaling_curves(all_results, all_checkpoints, args.out_dir)
 
-    print("\n" + "="*100)
+    print("\n" + "=" * 100)
     print("SUMMARY")
-    print("="*100)
+    print("=" * 100)
     print(f"{'Config':<20} {'Params':>10} {'FLOPs':>12} {'Tok/Param':>10} {'Val Loss':>10}")
-    print("-"*100)
+    print("-" * 100)
     for r in sorted(all_results, key=lambda x: (x.n_params, x.flop_budget)):
         cfg = f"d{r.n_embd}_L{r.n_layer}"
         print(f"{cfg:<20} {r.n_params:>10,} {r.flops_used:>12.2e} {r.tokens_per_param:>10.1f} {r.best_val_loss:>10.4f}")
