@@ -143,7 +143,11 @@ def main():
     ap.add_argument("--out_dir", type=str, default="out")
 
     # Device
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
+    )
     ap.add_argument("--seed", type=int, default=1337)
 
     args = ap.parse_args()

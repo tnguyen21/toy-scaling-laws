@@ -235,7 +235,6 @@ def plot_scaling_curves(
         color = config_to_color.get(cfg, "gray")
 
         # Filter out zero-flop points (recorded at iteration 1 before any training)
-        # These cause horizontal lines on log-scale plots
         filtered = [(c["flops"], c["val_loss"]) for c in checkpoints if c["flops"] > 0]
         if not filtered:
             continue
@@ -307,7 +306,11 @@ def main():
     ap = argparse.ArgumentParser(description="Scaling law sweep")
     ap.add_argument("--data_dir", type=str, default="data/shakespeare")
     ap.add_argument("--out_dir", type=str, default="sweep_results")
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
+    )
     ap.add_argument("--seed", type=int, default=1337)
 
     ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e12, 3e12, 1e13], help="FLOP budgets to sweep")
