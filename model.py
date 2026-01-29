@@ -1,4 +1,5 @@
 """Minimal GPT for character-level language modeling."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -118,7 +119,7 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0) -> torch.Tensor:
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.cfg.block_size:]
+            idx_cond = idx[:, -self.cfg.block_size :]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / max(temperature, 1e-8)
             probs = F.softmax(logits, dim=-1)

@@ -22,17 +22,6 @@ from model import GPT, ModelConfig
 from data import load_data, get_batch
 
 
-def estimate_total_flops(model: GPT, n_tokens: int) -> float:
-    """Estimate total training FLOPs for processing n_tokens."""
-    return model.estimate_flops_per_token() * n_tokens
-
-
-def tokens_for_flop_budget(model: GPT, flop_budget: float) -> int:
-    """How many tokens can we train on with this FLOP budget?"""
-    flops_per_token = model.estimate_flops_per_token()
-    return int(flop_budget / flops_per_token)
-
-
 @torch.no_grad()
 def estimate_loss(model: GPT, train_data, val_data, batch_size: int, block_size: int, device: str, eval_iters: int = 50):
     model.eval()
