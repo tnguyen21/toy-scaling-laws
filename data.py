@@ -1,4 +1,4 @@
-"""Text data loading with character-level encoding."""
+"""Text data loading with character-level encoding from FineWeb."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from datasets import load_dataset
 
 
 @dataclass
@@ -27,60 +28,6 @@ class CharDataset:
 
     def decode(self, ids: list[int]) -> str:
         return "".join(self.idx_to_char.get(i, "?") for i in ids)
-
-
-def prepare_data(
-    input_path: str,
-    out_dir: str,
-    val_fraction: float = 0.1,
-) -> tuple[str, str, dict]:
-    """
-    Prepare train/val splits from a text file using character-level encoding.
-
-    Args:
-        input_path: Path to input text file
-        out_dir: Output directory for train.bin, val.bin, meta.json
-        val_fraction: Fraction of data for validation
-
-    Returns:
-        Tuple of (train_path, val_path, metadata dict)
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(input_path, "r", encoding="utf-8") as f:
-        text = f.read()
-
-    chars = sorted(set(text))
-    vocab_size = len(chars)
-    char_to_idx = {c: i for i, c in enumerate(chars)}
-    idx_to_char = {i: c for i, c in enumerate(chars)}
-
-    ids = np.array([char_to_idx[c] for c in text], dtype=np.uint16)
-
-    meta = {
-        "vocab_size": vocab_size,
-        "char_to_idx": char_to_idx,
-        "idx_to_char": {str(k): v for k, v in idx_to_char.items()},
-    }
-
-    # Split into train/val
-    n_val = int(len(ids) * val_fraction)
-    n_train = len(ids) - n_val
-
-    train_ids = ids[:n_train]
-    val_ids = ids[n_train:]
-
-    # Write binary files
-    train_path = out_dir / "train.bin"
-    val_path = out_dir / "val.bin"
-    train_ids.tofile(train_path)
-    val_ids.tofile(val_path)
-
-    meta["train_tokens"] = len(train_ids)
-    meta["val_tokens"] = len(val_ids)
-
-    return str(train_path), str(val_path), meta
 
 
 def load_data(data_dir: str) -> tuple[CharDataset, CharDataset]:
@@ -128,37 +75,91 @@ def get_batch(
     return x.to(device), y.to(device)
 
 
-# --- CLI for preparing data ---
+# --- CLI for preparing data from FineWeb ---
 
 if __name__ == "__main__":
     import argparse
-    import urllib.request
 
-    ap = argparse.ArgumentParser(description="Prepare text data for training (character-level)")
-    ap.add_argument("--input", type=str, help="Path to input text file")
-    ap.add_argument("--out_dir", type=str, default="data/char", help="Output directory")
+    from tqdm import tqdm
+
+    ap = argparse.ArgumentParser(description="Prepare FineWeb data for training (character-level)")
+    ap.add_argument("--out_dir", type=str, default="data/fineweb_char", help="Output directory")
+    ap.add_argument("--dataset", type=str, default="HuggingFaceFW/fineweb", help="HuggingFace dataset")
+    ap.add_argument("--name", type=str, default="sample-10BT", help="Dataset config name")
+    ap.add_argument("--split", type=str, default="train", help="Dataset split")
+    ap.add_argument("--text_field", type=str, default="text", help="Field containing text")
+    ap.add_argument("--num_docs", type=int, default=5_000, help="Number of documents to process")
     ap.add_argument("--val_fraction", type=float, default=0.1, help="Fraction for validation")
-    ap.add_argument("--download_shakespeare", action="store_true", help="Download tiny shakespeare")
+    ap.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
 
     args = ap.parse_args()
 
-    if args.download_shakespeare:
-        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        input_path = Path(args.out_dir) / "input.txt"
-        input_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Downloading tiny shakespeare to {input_path}...")
-        urllib.request.urlretrieve(url, input_path)
-        args.input = str(input_path)
+    out_dir = Path(args.out_dir)
+    train_path = out_dir / "train.bin"
+    val_path = out_dir / "val.bin"
+    meta_path = out_dir / "meta.json"
 
-    if not args.input:
-        raise ValueError("Must provide --input or --download_shakespeare")
+    for p in (train_path, val_path, meta_path):
+        if p.exists() and not args.overwrite:
+            raise SystemExit(f"Refusing to overwrite existing file: {p} (pass --overwrite)")
 
-    train_path, val_path, meta = prepare_data(args.input, args.out_dir, val_fraction=args.val_fraction)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    meta_path = Path(args.out_dir) / "meta.json"
+    print(f"Loading {args.dataset}/{args.name} (streaming)...")
+    ds = load_dataset(args.dataset, args.name, split=args.split, streaming=True)
+
+    # First pass: collect all text to build vocabulary
+    print("Pass 1: Building vocabulary...")
+    all_chars: set[str] = set()
+    texts: list[str] = []
+
+    for i, ex in enumerate(tqdm(ds, total=args.num_docs, desc="scanning")):
+        if i >= args.num_docs:
+            break
+        text = ex.get(args.text_field, "")
+        if not isinstance(text, str) or not text:
+            continue
+        texts.append(text)
+        all_chars.update(text)
+
+    chars = sorted(all_chars)
+    vocab_size = len(chars)
+    char_to_idx = {c: i for i, c in enumerate(chars)}
+    idx_to_char = {i: c for i, c in enumerate(chars)}
+
+    print(f"Vocabulary size: {vocab_size}")
+
+    # Second pass: encode all text
+    print("Pass 2: Encoding...")
+    all_ids: list[int] = []
+    for text in tqdm(texts, desc="encoding"):
+        all_ids.extend(char_to_idx[c] for c in text)
+
+    # Split into train/val
+    ids = np.array(all_ids, dtype=np.uint16)
+    n_val = int(len(ids) * args.val_fraction)
+    n_train = len(ids) - n_val
+
+    train_arr = ids[:n_train]
+    val_arr = ids[n_train:]
+
+    train_arr.tofile(train_path)
+    val_arr.tofile(val_path)
+
+    meta = {
+        "dataset": args.dataset,
+        "name": args.name,
+        "num_docs": len(texts),
+        "vocab_size": vocab_size,
+        "char_to_idx": char_to_idx,
+        "idx_to_char": {str(k): v for k, v in idx_to_char.items()},
+        "train_tokens": len(train_arr),
+        "val_tokens": len(val_arr),
+    }
+
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"Wrote {train_path} ({meta['train_tokens']:,} chars)")
-    print(f"Wrote {val_path} ({meta['val_tokens']:,} chars)")
-    print(f"Wrote {meta_path} (vocab_size={meta['vocab_size']})")
+    print(f"Wrote {train_path} ({len(train_arr):,} chars)")
+    print(f"Wrote {val_path} ({len(val_arr):,} chars)")
+    print(f"Wrote {meta_path} (vocab_size={vocab_size})")

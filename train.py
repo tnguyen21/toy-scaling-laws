@@ -104,7 +104,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     # Data
-    ap.add_argument("--data_dir", type=str, default="data/shakespeare", help="Directory with train.bin, val.bin, meta.json")
+    ap.add_argument("--data_dir", type=str, default="data/fineweb_char", help="Directory with train.bin, val.bin, meta.json")
 
     # Model
     ap.add_argument("--n_layer", type=int, default=4)

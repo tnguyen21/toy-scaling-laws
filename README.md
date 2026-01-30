@@ -11,43 +11,22 @@ uv sync
 ## Quick Start
 
 ```bash
-# 1. Prepare data (downloads tiny shakespeare)
-python data.py --download_shakespeare --out_dir data/shakespeare
+# 1. Prepare data (downloads FineWeb documents, char-level encoding)
+python data.py
 
 # 2. Train with a FLOP budget
-python train.py --data_dir data/shakespeare --flop_budget 1e15
+python train.py --flop_budget 1e15
 
 # Or train for fixed iterations
-python train.py --data_dir data/shakespeare --max_iters 5000
+python train.py --max_iters 5000
 ```
 
-## Encoding Options
-
-Data can be prepared with character-level or BPE tokenization:
+Data is saved to `data/fineweb_char/` by default. Customize with:
 
 ```bash
-# Character-level (default) - each character is a token
-python data.py --download_shakespeare --encoding char --out_dir data/char
-
-# GPT-2 BPE tokenizer (50,257 vocab)
-python data.py --download_shakespeare --encoding gpt2 --out_dir data/gpt2
-
-# Other tiktoken encodings
-python data.py --input mytext.txt --encoding cl100k_base --out_dir data/cl100k
+python data.py --num_docs 10000 --out_dir data/fineweb_10k
+python train.py --data_dir data/fineweb_10k --flop_budget 1e15
 ```
-
-The training script auto-detects the encoding from `meta.json`:
-
-```bash
-python train.py --data_dir data/gpt2 --flop_budget 1e15
-```
-
-| Encoding | Vocab Size | Use Case |
-|----------|------------|----------|
-| `char` | ~65 (text-dependent) | Fast experiments, small models |
-| `gpt2` | 50,257 | Standard BPE, comparable to GPT-2 |
-| `r50k_base` | 50,257 | Codex models |
-| `cl100k_base` | 100,277 | GPT-4, ChatGPT models |
 
 ## FLOP-Targeted Training
 
@@ -60,8 +39,23 @@ python train.py --n_embd 128 --n_layer 4 --flop_budget 1e15
 python train.py --n_embd 256 --n_layer 6 --flop_budget 1e15
 ```
 
+## Sweeps
+
+Run a scaling law sweep across model sizes and compute budgets:
+
+```bash
+# Default sweep
+python sweep.py
+
+# Custom sweep
+python sweep.py --flop_budgets 1e12 3e12 1e13 --n_embds 32 64 128 256
+```
+
+Results are saved to `sweep_results/` with plots and a CSV.
+
 ## Files
 
 - `model.py` — minimal GPT (attention, MLP, embeddings)
-- `data.py` — data prep and loading (char-level or BPE via tiktoken)
+- `data.py` — data prep and loading (char-level from FineWeb)
 - `train.py` — training loop with FLOP targeting
+- `sweep.py` — scaling law experiments across model sizes

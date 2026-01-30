@@ -6,8 +6,8 @@ Produces a plot like Karpathy's miniseries showing loss vs compute for different
 revealing the "compute-optimal frontier" where larger models reach lower loss but need more FLOPs.
 
 Usage:
-    python sweep.py --data_dir data/shakespeare
-    python sweep.py --data_dir data/shakespeare --flop_budgets 1e12 3e12 1e13 --n_embds 32 64 128 256
+    python sweep.py
+    python sweep.py --flop_budgets 1e12 3e12 1e13 --n_embds 32 64 128 256
 
 Example configs:
 
@@ -304,7 +304,7 @@ def plot_scaling_curves(
 
 def main():
     ap = argparse.ArgumentParser(description="Scaling law sweep")
-    ap.add_argument("--data_dir", type=str, default="data/shakespeare")
+    ap.add_argument("--data_dir", type=str, default="data/fineweb_char")
     ap.add_argument("--out_dir", type=str, default="sweep_results")
     ap.add_argument(
         "--device",
