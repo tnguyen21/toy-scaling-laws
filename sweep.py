@@ -234,7 +234,7 @@ def plot_scaling_curves(
         cfg = (n_embd, n_layer, n_params)
         color = config_to_color.get(cfg, "gray")
 
-        # Filter out zero-flop points (recorded at iteration 1 before any training)
+        # Filter out zero-flop points (first checkpoint is at iter=1 before training step)
         filtered = [(c["flops"], c["val_loss"]) for c in checkpoints if c["flops"] > 0]
         if not filtered:
             continue
@@ -390,11 +390,9 @@ def main():
 
             all_results.append(result)
 
-            # Aggregate checkpoints by model config
+            # Keep only checkpoints from highest FLOP budget run (for clean curves)
             key = (n_embd, n_layer)
-            if key not in all_checkpoints:
-                all_checkpoints[key] = []
-            all_checkpoints[key].extend(checkpoints)
+            all_checkpoints[key] = checkpoints
 
             csv_writer.writerow(
                 [
