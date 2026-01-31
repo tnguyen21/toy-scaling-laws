@@ -104,7 +104,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     # Data
-    ap.add_argument("--data_dir", type=str, default="data/fineweb_char", help="Directory with train.bin, val.bin, meta.json")
+    ap.add_argument("--data_dir", type=str, default="data/fineweb_gpt2", help="Directory with train.bin, val.bin, meta.json")
 
     # Model
     ap.add_argument("--n_layer", type=int, default=4)
@@ -146,7 +146,7 @@ def main():
 
     # Load data
     train_ds, val_ds = load_data(args.data_dir)
-    print(f"Loaded data: {len(train_ds):,} train chars, {len(val_ds):,} val chars, vocab_size={train_ds.vocab_size}")
+    print(f"Loaded data: {len(train_ds):,} train tokens, {len(val_ds):,} val tokens, vocab_size={train_ds.vocab_size}")
 
     # Build model
     cfg = ModelConfig(

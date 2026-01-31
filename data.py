@@ -1,37 +1,40 @@
-"""Text data loading with character-level encoding from FineWeb."""
+"""Text data loading with GPT-2 BPE encoding from FineWeb."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import tiktoken
 import torch
 from datasets import load_dataset
 
+# GPT-2 encoding (50257 tokens)
+GPT2_VOCAB_SIZE = 50257
+
 
 @dataclass
-class CharDataset:
-    """Memory-mapped character-level text dataset."""
+class TokenDataset:
+    """Memory-mapped token dataset with tiktoken GPT-2 encoding."""
 
     data: np.memmap
     vocab_size: int
-    char_to_idx: dict[str, int] = field(default_factory=dict)
-    idx_to_char: dict[int, str] = field(default_factory=dict)
+    encoding: tiktoken.Encoding
 
     def __len__(self) -> int:
         return len(self.data)
 
     def encode(self, text: str) -> list[int]:
-        return [self.char_to_idx.get(c, 0) for c in text]
+        return self.encoding.encode(text)
 
     def decode(self, ids: list[int]) -> str:
-        return "".join(self.idx_to_char.get(i, "?") for i in ids)
+        return self.encoding.decode(ids)
 
 
-def load_data(data_dir: str) -> tuple[CharDataset, CharDataset]:
-    """Load prepared character-level data from a directory."""
+def load_data(data_dir: str) -> tuple[TokenDataset, TokenDataset]:
+    """Load prepared token data from a directory."""
     data_dir = Path(data_dir)
     meta_path = data_dir / "meta.json"
 
@@ -39,24 +42,13 @@ def load_data(data_dir: str) -> tuple[CharDataset, CharDataset]:
         meta = json.load(f)
 
     vocab_size = meta["vocab_size"]
-    char_to_idx = meta["char_to_idx"]
-    idx_to_char = {int(k): v for k, v in meta["idx_to_char"].items()}
+    enc = tiktoken.get_encoding("gpt2")
 
     train_data = np.memmap(data_dir / "train.bin", dtype=np.uint16, mode="r")
     val_data = np.memmap(data_dir / "val.bin", dtype=np.uint16, mode="r")
 
-    train_ds = CharDataset(
-        data=train_data,
-        vocab_size=vocab_size,
-        char_to_idx=char_to_idx,
-        idx_to_char=idx_to_char,
-    )
-    val_ds = CharDataset(
-        data=val_data,
-        vocab_size=vocab_size,
-        char_to_idx=char_to_idx,
-        idx_to_char=idx_to_char,
-    )
+    train_ds = TokenDataset(data=train_data, vocab_size=vocab_size, encoding=enc)
+    val_ds = TokenDataset(data=val_data, vocab_size=vocab_size, encoding=enc)
 
     return train_ds, val_ds
 
@@ -82,8 +74,8 @@ if __name__ == "__main__":
 
     from tqdm import tqdm
 
-    ap = argparse.ArgumentParser(description="Prepare FineWeb data for training (character-level)")
-    ap.add_argument("--out_dir", type=str, default="data/fineweb_char", help="Output directory")
+    ap = argparse.ArgumentParser(description="Prepare FineWeb data for training (GPT-2 BPE)")
+    ap.add_argument("--out_dir", type=str, default="data/fineweb_gpt2", help="Output directory")
     ap.add_argument("--dataset", type=str, default="HuggingFaceFW/fineweb", help="HuggingFace dataset")
     ap.add_argument("--name", type=str, default="sample-10BT", help="Dataset config name")
     ap.add_argument("--split", type=str, default="train", help="Dataset split")
@@ -108,32 +100,21 @@ if __name__ == "__main__":
     print(f"Loading {args.dataset}/{args.name} (streaming)...")
     ds = load_dataset(args.dataset, args.name, split=args.split, streaming=True)
 
-    # First pass: collect all text to build vocabulary
-    print("Pass 1: Building vocabulary...")
-    all_chars: set[str] = set()
-    texts: list[str] = []
+    # Initialize GPT-2 tokenizer
+    enc = tiktoken.get_encoding("gpt2")
+    print(f"Using GPT-2 BPE encoding (vocab_size={GPT2_VOCAB_SIZE})")
 
-    for i, ex in enumerate(tqdm(ds, total=args.num_docs, desc="scanning")):
+    # Single pass: encode all documents
+    print("Encoding documents...")
+    all_ids: list[int] = []
+
+    for i, ex in enumerate(tqdm(ds, total=args.num_docs, desc="encoding")):
         if i >= args.num_docs:
             break
         text = ex.get(args.text_field, "")
         if not isinstance(text, str) or not text:
             continue
-        texts.append(text)
-        all_chars.update(text)
-
-    chars = sorted(all_chars)
-    vocab_size = len(chars)
-    char_to_idx = {c: i for i, c in enumerate(chars)}
-    idx_to_char = {i: c for i, c in enumerate(chars)}
-
-    print(f"Vocabulary size: {vocab_size}")
-
-    # Second pass: encode all text
-    print("Pass 2: Encoding...")
-    all_ids: list[int] = []
-    for text in tqdm(texts, desc="encoding"):
-        all_ids.extend(char_to_idx[c] for c in text)
+        all_ids.extend(enc.encode(text))
 
     # Split into train/val
     ids = np.array(all_ids, dtype=np.uint16)
@@ -147,12 +128,11 @@ if __name__ == "__main__":
     val_arr.tofile(val_path)
 
     meta = {
+        "encoding": "gpt2",
         "dataset": args.dataset,
         "name": args.name,
-        "num_docs": len(texts),
-        "vocab_size": vocab_size,
-        "char_to_idx": char_to_idx,
-        "idx_to_char": {str(k): v for k, v in idx_to_char.items()},
+        "num_docs": args.num_docs,
+        "vocab_size": GPT2_VOCAB_SIZE,
         "train_tokens": len(train_arr),
         "val_tokens": len(val_arr),
     }
@@ -160,6 +140,6 @@ if __name__ == "__main__":
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"Wrote {train_path} ({len(train_arr):,} chars)")
-    print(f"Wrote {val_path} ({len(val_arr):,} chars)")
-    print(f"Wrote {meta_path} (vocab_size={vocab_size})")
+    print(f"Wrote {train_path} ({len(train_arr):,} tokens)")
+    print(f"Wrote {val_path} ({len(val_arr):,} tokens)")
+    print(f"Wrote {meta_path} (vocab_size={GPT2_VOCAB_SIZE})")

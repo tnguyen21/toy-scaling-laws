@@ -24,7 +24,7 @@ Example configs:
     # n_embds: [128, 192, 256, 320, 384]
     # n_layers: [4, 4, 6, 6, 6]
     # batch_size: 64, block_size: 256, eval_iters: 50
-    
+
     uv run sweep.py --flop_budgets 1e16 3e16 1e17 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256 --eval_iters 50
 
     # Large: ~60M-240M params
@@ -335,7 +335,16 @@ def plot_scaling_curves(
                 min_idx = np.argmin(losses)
                 optimal_params = params[min_idx]
                 optimal_loss = losses[min_idx]
-                ax.scatter([optimal_params], [optimal_loss], color=color, s=200, marker="*", zorder=10, edgecolors="black", linewidths=0.5)
+                ax.scatter(
+                    [optimal_params],
+                    [optimal_loss],
+                    color=color,
+                    s=200,
+                    marker="*",
+                    zorder=10,
+                    edgecolors="black",
+                    linewidths=0.5,
+                )
                 optimal_points.append((flop_budget, optimal_params, optimal_loss))
 
         ax.set_xlabel("Parameters")
@@ -402,7 +411,7 @@ def plot_scaling_curves(
 
 def main():
     ap = argparse.ArgumentParser(description="Scaling law sweep")
-    ap.add_argument("--data_dir", type=str, default="data/fineweb_char")
+    ap.add_argument("--data_dir", type=str, default="data/fineweb_gpt2")
     ap.add_argument("--out_dir", type=str, default="sweep_results")
     ap.add_argument(
         "--device",
