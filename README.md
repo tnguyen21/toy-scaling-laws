@@ -24,8 +24,8 @@ python train.py --max_iters 5000
 Data is saved to `data/fineweb_char/` by default. Customize with:
 
 ```bash
-python data.py --num_docs 10000 --out_dir data/fineweb_10k
-python train.py --data_dir data/fineweb_10k --flop_budget 1e15
+python data.py --num_docs 25000 --out_dir data/fineweb_25k # ~100M training tokens
+python train.py --data_dir data/fineweb_25k --flop_budget 1e15
 ```
 
 ## FLOP-Targeted Training
