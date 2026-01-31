@@ -17,6 +17,14 @@ Example configs:
     # n_layers: [1, 2, 3, 4]
     # batch_size: 32, block_size: 64, eval_iters: 20
 
+    # Medium: ~1M-10M params, 1 OOM param sweep
+    # Model sizes: d=128 (~1M), d=192 (~2M), d=256 (~5M), d=320 (~7M), d=384 (~10M)
+    # FLOP budgets span 2 OOM to see scaling curves cross
+    # flop_budgets: [1e14, 3e14, 1e15, 3e15, 1e16]
+    # n_embds: [128, 192, 256, 320, 384]
+    # n_layers: [4, 4, 6, 6, 6]
+    # batch_size: 64, block_size: 256, eval_iters: 50
+
     # Large: ~60M-240M params
     # FLOP budgets span 1 order of magnitude for visible scaling curves
     # Model sizes: d=640 (~59M), d=768 (~85M), d=896 (~116M), d=1024 (~151M), d=1280 (~236M)
@@ -330,7 +338,7 @@ def main():
     eval_iters = args.eval_iters
 
     print(f"Device: {args.device}")
-    print(f"FLOP budgets: {flop_budgets}")
+    print(f"FLOP budgets: [{', '.join(f'{b:.0e}' for b in flop_budgets)}]")
     print(f"n_embds: {n_embds}")
     print(f"n_layers: {n_layers}")
 
