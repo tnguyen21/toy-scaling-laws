@@ -24,6 +24,8 @@ Example configs:
     # n_embds: [128, 192, 256, 320, 384]
     # n_layers: [4, 4, 6, 6, 6]
     # batch_size: 64, block_size: 256, eval_iters: 50
+    
+    uv run sweep.py --flop_budgets 1e16 3e16 1e17 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256 --eval_iters 50
 
     # Large: ~60M-240M params
     # FLOP budgets span 1 order of magnitude for visible scaling curves
@@ -308,6 +310,94 @@ def plot_scaling_curves(
     plt.savefig(os.path.join(out_dir, "scaling_curves_loglog.png"), dpi=150)
     plt.close()
     print(f"Saved log-log plot to {out_dir}/scaling_curves_loglog.png")
+
+    # IsoFLOP curves: Loss vs Params for each FLOP budget (shows U-shape)
+    unique_flop_budgets = sorted(set(r.flop_budget for r in all_results))
+    if len(unique_flop_budgets) >= 2:
+        fig, ax = plt.subplots(figsize=(10, 7))
+        flop_colors = plt.cm.viridis(np.linspace(0, 1, len(unique_flop_budgets)))
+
+        optimal_points = []  # (flop_budget, optimal_params, optimal_loss)
+
+        for i, flop_budget in enumerate(unique_flop_budgets):
+            results = [r for r in all_results if r.flop_budget == flop_budget]
+            results.sort(key=lambda r: r.n_params)
+
+            params = [r.n_params for r in results]
+            losses = [r.best_val_loss for r in results]
+
+            color = flop_colors[i]
+            label = f"{flop_budget:.0e}"
+            ax.plot(params, losses, "o--", color=color, label=label, markersize=8, alpha=0.8)
+
+            # Find and mark optimal point (minimum loss)
+            if losses:
+                min_idx = np.argmin(losses)
+                optimal_params = params[min_idx]
+                optimal_loss = losses[min_idx]
+                ax.scatter([optimal_params], [optimal_loss], color=color, s=200, marker="*", zorder=10, edgecolors="black", linewidths=0.5)
+                optimal_points.append((flop_budget, optimal_params, optimal_loss))
+
+        ax.set_xlabel("Parameters")
+        ax.set_ylabel("Validation Loss")
+        ax.set_title("IsoFLOP Curves (Loss vs Model Size)")
+        ax.set_xscale("log")
+        ax.legend(title="FLOPs", fontsize=8, loc="upper right")
+        ax.grid(True, alpha=0.3, which="both")
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "isoflop_curves.png"), dpi=150)
+        plt.close()
+        print(f"Saved isoFLOP curves to {out_dir}/isoflop_curves.png")
+
+        # If we have optimal points, also plot optimal N and D vs compute
+        if len(optimal_points) >= 2:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+            flops_opt = [p[0] for p in optimal_points]
+            params_opt = [p[1] for p in optimal_points]
+
+            # Compute optimal tokens: C ≈ 6 * N * D, so D ≈ C / (6 * N)
+            tokens_opt = [f / (6 * n) for f, n in zip(flops_opt, params_opt)]
+
+            # Plot 1: Optimal params vs FLOPs
+            ax = axes[0]
+            ax.loglog(flops_opt, params_opt, "o-", color="tab:blue", markersize=10)
+            ax.set_xlabel("FLOPs")
+            ax.set_ylabel("Optimal Parameters")
+            ax.set_title("Optimal Model Size vs Compute")
+            ax.grid(True, alpha=0.3, which="both")
+
+            # Fit power law: N = a * C^b
+            if len(flops_opt) >= 2:
+                log_flops = np.log(flops_opt)
+                log_params = np.log(params_opt)
+                b, log_a = np.polyfit(log_flops, log_params, 1)
+                fit_flops = np.array([min(flops_opt), max(flops_opt)])
+                fit_params = np.exp(log_a) * fit_flops**b
+                ax.loglog(fit_flops, fit_params, "--", color="tab:red", label=f"N ∝ C^{b:.2f}")
+                ax.legend()
+
+            # Plot 2: Optimal tokens vs FLOPs
+            ax = axes[1]
+            ax.loglog(flops_opt, tokens_opt, "o-", color="tab:orange", markersize=10)
+            ax.set_xlabel("FLOPs")
+            ax.set_ylabel("Optimal Tokens")
+            ax.set_title("Optimal Training Tokens vs Compute")
+            ax.grid(True, alpha=0.3, which="both")
+
+            # Fit power law: D = a * C^b
+            if len(flops_opt) >= 2:
+                log_tokens = np.log(tokens_opt)
+                b, log_a = np.polyfit(log_flops, log_tokens, 1)
+                fit_tokens = np.exp(log_a) * fit_flops**b
+                ax.loglog(fit_flops, fit_tokens, "--", color="tab:red", label=f"D ∝ C^{b:.2f}")
+                ax.legend()
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "optimal_scaling.png"), dpi=150)
+            plt.close()
+            print(f"Saved optimal scaling plot to {out_dir}/optimal_scaling.png")
 
 
 def main():
