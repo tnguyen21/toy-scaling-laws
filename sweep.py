@@ -103,8 +103,8 @@ def estimate_loss(model, train_data, val_data, batch_size, block_size, device, e
 
 
 def get_lr_for_model(n_embd: int, base_lr: float = 1e-3) -> float:
-    """Scale learning rate with model size: LR ∝ sqrt(n_embd / 128)."""
-    return base_lr * math.sqrt(n_embd / 128)
+    """Scale learning rate with model size: LR ∝ 1/sqrt(n_embd / 128)."""
+    return base_lr / math.sqrt(n_embd / 128)
 
 
 def train_model(
@@ -158,13 +158,13 @@ def train_model(
     tokens_trained = max_iters * tokens_per_iter
     tokens_per_param = tokens_trained / n_params if n_params > 0 else 0.0
 
+    # Scale learning rate with model size
+    scaled_lr = get_lr_for_model(n_embd, learning_rate)
+
     if verbose:
         print(
             f"  Model: d={n_embd}, L={n_layer}, h={n_head}, params={n_params:,}, iters={max_iters}, tok/param={tokens_per_param:.1f}, lr={scaled_lr:.2e}"
         )
-
-    # Scale learning rate with model size
-    scaled_lr = get_lr_for_model(n_embd, learning_rate)
     scaled_min_lr = min_lr * (scaled_lr / learning_rate)  # Keep same ratio
 
     optimizer = model.configure_optim(weight_decay=weight_decay, learning_rate=scaled_lr)
