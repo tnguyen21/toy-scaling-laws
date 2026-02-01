@@ -17,9 +17,31 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model import GPT, ModelConfig
 from data import load_data, get_batch
+
+
+def setup_ddp():
+    """Initialize DDP if launched via torchrun, otherwise single-GPU/CPU fallback."""
+    if "RANK" in os.environ:
+        dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device = f"cuda:{rank}"
+        torch.cuda.set_device(device)
+    else:
+        rank, world_size = 0, 1
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    return rank, world_size, device
+
+
+def cleanup_ddp(world_size: int):
+    """Clean up DDP process group."""
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 @torch.no_grad()
@@ -101,20 +123,24 @@ def plot_training_progress(history: dict, out_dir: str):
 
 
 def main():
+    # Setup DDP first (before parsing args that depend on device)
+    rank, world_size, device = setup_ddp()
+    is_main = rank == 0
+
     ap = argparse.ArgumentParser()
 
     # Data
     ap.add_argument("--data_dir", type=str, default="data/fineweb_gpt2", help="Directory with train.bin, val.bin, meta.json")
 
-    # Model
-    ap.add_argument("--n_layer", type=int, default=4)
-    ap.add_argument("--n_head", type=int, default=4)
-    ap.add_argument("--n_embd", type=int, default=128)
-    ap.add_argument("--block_size", type=int, default=256)
+    # Model (small defaults for GPT-2 tokenizer with 50K vocab)
+    ap.add_argument("--n_layer", type=int, default=2)
+    ap.add_argument("--n_head", type=int, default=2)
+    ap.add_argument("--n_embd", type=int, default=64)
+    ap.add_argument("--block_size", type=int, default=128)
     ap.add_argument("--dropout", type=float, default=0.0)
 
     # Training
-    ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--learning_rate", type=float, default=1e-3)
     ap.add_argument("--min_lr", type=float, default=1e-4)
     ap.add_argument("--weight_decay", type=float, default=0.1)
@@ -122,7 +148,7 @@ def main():
     ap.add_argument("--warmup_frac", type=float, default=0.1, help="Fraction of training for warmup")
 
     # FLOP budget (the key parameter!)
-    ap.add_argument("--flop_budget", type=float, default=1e15, help="Total training FLOPs budget")
+    ap.add_argument("--flop_budget", type=float, default=1e12, help="Total training FLOPs budget")
     ap.add_argument("--max_iters", type=int, default=None, help="Override: max iterations (ignores flop_budget)")
 
     # Eval & logging
@@ -131,22 +157,24 @@ def main():
     ap.add_argument("--log_interval", type=int, default=50)
     ap.add_argument("--out_dir", type=str, default="out")
 
-    # Device
-    ap.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
-    )
+    # Device (ignored when using DDP, kept for backward compatibility)
+    ap.add_argument("--device", type=str, default=None, help="Device (auto-detected with DDP)")
     ap.add_argument("--seed", type=int, default=1337)
 
     args = ap.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    # Per-rank seed for different batches across GPUs
+    torch.manual_seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
+
+    # Scale LR with world size: sqrt scaling
+    effective_lr = args.learning_rate * math.sqrt(world_size)
+    effective_min_lr = args.min_lr * math.sqrt(world_size)
 
     # Load data
     train_ds, val_ds = load_data(args.data_dir)
-    print(f"Loaded data: {len(train_ds):,} train tokens, {len(val_ds):,} val tokens, vocab_size={train_ds.vocab_size}")
+    if is_main:
+        print(f"Loaded data: {len(train_ds):,} train tokens, {len(val_ds):,} val tokens, vocab_size={train_ds.vocab_size}")
 
     # Build model
     cfg = ModelConfig(
@@ -157,13 +185,20 @@ def main():
         n_embd=args.n_embd,
         dropout=args.dropout,
     )
-    model = GPT(cfg).to(args.device)
+    model = GPT(cfg).to(device)
     n_params = model.num_params()
-    print(f"Model: {n_params:,} parameters ({n_params / 1e6:.2f}M)")
+    if is_main:
+        print(f"Model: {n_params:,} parameters ({n_params / 1e6:.2f}M)")
+
+    # Wrap model in DDP if using multiple GPUs
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank])
 
     # Compute training schedule from FLOP budget
-    tokens_per_iter = args.batch_size * args.block_size
-    flops_per_iter = model.estimate_flops_per_token() * tokens_per_iter
+    # Get the raw model for FLOP estimation (unwrap DDP if needed)
+    raw_model = model.module if world_size > 1 else model
+    tokens_per_iter = args.batch_size * args.block_size * world_size  # Scale with world_size
+    flops_per_iter = raw_model.estimate_flops_per_token() * tokens_per_iter
 
     if args.max_iters is not None:
         max_iters = args.max_iters
@@ -175,22 +210,28 @@ def main():
     total_tokens = max_iters * tokens_per_iter
     warmup_iters = int(args.warmup_frac * max_iters)
 
-    print("\n=== Training Plan ===")
-    print(f"FLOP budget: {total_flops:.2e}")
-    print(f"FLOPs per iter: {flops_per_iter:.2e}")
-    print(f"Max iterations: {max_iters:,}")
-    print(f"Total tokens: {total_tokens:,} ({total_tokens / 1e6:.1f}M)")
-    print(f"Warmup iters: {warmup_iters:,}")
-    print("======================\n")
+    if is_main:
+        print("\n=== Training Plan ===")
+        print(f"FLOP budget: {total_flops:.2e}")
+        print(f"FLOPs per iter: {flops_per_iter:.2e}")
+        print(f"Max iterations: {max_iters:,}")
+        print(f"Total tokens: {total_tokens:,} ({total_tokens / 1e6:.1f}M)")
+        print(f"Warmup iters: {warmup_iters:,}")
+        if world_size > 1:
+            print(f"World size: {world_size} GPUs")
+            print(f"Effective batch size: {args.batch_size * world_size}")
+            print(f"Effective LR: {effective_lr:.2e}")
+        print("======================\n")
 
-    # Optimizer
-    optimizer = model.configure_optim(
+    # Optimizer (use raw_model for configure_optim, use scaled LR)
+    optimizer = raw_model.configure_optim(
         weight_decay=args.weight_decay,
-        learning_rate=args.learning_rate,
+        learning_rate=effective_lr,
     )
 
-    # Output directory
-    os.makedirs(args.out_dir, exist_ok=True)
+    # Output directory (only rank 0 creates)
+    if is_main:
+        os.makedirs(args.out_dir, exist_ok=True)
 
     # Metrics history for plotting
     history = {
@@ -207,36 +248,37 @@ def main():
     flops_used = 0
 
     for it in range(1, max_iters + 1):
-        # Learning rate schedule
-        lr = get_lr(it - 1, warmup_iters, max_iters, args.learning_rate, args.min_lr)
+        # Learning rate schedule (use effective LRs)
+        lr = get_lr(it - 1, warmup_iters, max_iters, effective_lr, effective_min_lr)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        # Eval
+        # Eval (only rank 0 prints and saves)
         if it == 1 or it % args.eval_interval == 0 or it == max_iters:
-            losses = estimate_loss(model, train_ds, val_ds, args.batch_size, args.block_size, args.device, args.eval_iters)
-            print(f"[iter {it:5d}] train_loss={losses['train']:.4f} val_loss={losses['val']:.4f} lr={lr:.2e} flops={flops_used:.2e}")
+            losses = estimate_loss(model, train_ds, val_ds, args.batch_size, args.block_size, device, args.eval_iters)
+            if is_main:
+                print(f"[iter {it:5d}] train_loss={losses['train']:.4f} val_loss={losses['val']:.4f} lr={lr:.2e} flops={flops_used:.2e}")
 
-            # Record metrics for plotting
-            history["iter"].append(it)
-            history["train_loss"].append(losses["train"])
-            history["val_loss"].append(losses["val"])
-            history["lr"].append(lr)
-            history["flops"].append(flops_used)
+                # Record metrics for plotting
+                history["iter"].append(it)
+                history["train_loss"].append(losses["train"])
+                history["val_loss"].append(losses["val"])
+                history["lr"].append(lr)
+                history["flops"].append(flops_used)
 
-            if losses["val"] < best_val_loss:
-                best_val_loss = losses["val"]
-                ckpt = {
-                    "model": model.state_dict(),
-                    "config": cfg.__dict__,
-                    "iter": it,
-                    "best_val_loss": best_val_loss,
-                    "flops_used": flops_used,
-                }
-                torch.save(ckpt, os.path.join(args.out_dir, "best.pt"))
+                if losses["val"] < best_val_loss:
+                    best_val_loss = losses["val"]
+                    ckpt = {
+                        "model": raw_model.state_dict(),
+                        "config": cfg.__dict__,
+                        "iter": it,
+                        "best_val_loss": best_val_loss,
+                        "flops_used": flops_used,
+                    }
+                    torch.save(ckpt, os.path.join(args.out_dir, "best.pt"))
 
         # Training step
-        x, y = get_batch(train_ds.data, args.batch_size, args.block_size, args.device)
+        x, y = get_batch(train_ds.data, args.batch_size, args.block_size, device)
         _, loss = model(x, y)
 
         optimizer.zero_grad(set_to_none=True)
@@ -247,37 +289,42 @@ def main():
 
         flops_used += flops_per_iter
 
-        # Logging
-        if it % args.log_interval == 0:
+        # Logging (only rank 0)
+        if it % args.log_interval == 0 and is_main:
             dt = time.time() - t0
             t0 = time.time()
             tokens_per_sec = tokens_per_iter * args.log_interval / dt
             print(f"  iter {it:5d} | loss {loss.item():.4f} | {tokens_per_sec:.0f} tok/s | {dt * 1000 / args.log_interval:.1f} ms/iter")
 
-    # Plot training progress
-    if len(history["iter"]) > 1:
-        plot_training_progress(history, args.out_dir)
+    # Only rank 0 handles plotting, generation sample, and final checkpoint
+    if is_main:
+        # Plot training progress
+        if len(history["iter"]) > 1:
+            plot_training_progress(history, args.out_dir)
 
-    # Final generation sample
-    print("\n=== Sample Generation ===")
-    model.eval()
-    prompt = "ROMEO:"
-    ids = train_ds.encode(prompt)
-    x = torch.tensor(ids, dtype=torch.long, device=args.device).unsqueeze(0)
-    with torch.no_grad():
-        out = model.generate(x, max_new_tokens=200, temperature=0.8)
-    print(train_ds.decode(out[0].tolist()))
+        # Final generation sample
+        print("\n=== Sample Generation ===")
+        raw_model.eval()
+        prompt = "ROMEO:"
+        ids = train_ds.encode(prompt)
+        x = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
+        with torch.no_grad():
+            out = raw_model.generate(x, max_new_tokens=200, temperature=0.8)
+        print(train_ds.decode(out[0].tolist()))
 
-    # Save final checkpoint
-    final_ckpt = {
-        "model": model.state_dict(),
-        "config": cfg.__dict__,
-        "iter": max_iters,
-        "final_val_loss": losses["val"],
-        "flops_used": flops_used,
-    }
-    torch.save(final_ckpt, os.path.join(args.out_dir, "final.pt"))
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+        # Save final checkpoint
+        final_ckpt = {
+            "model": raw_model.state_dict(),
+            "config": cfg.__dict__,
+            "iter": max_iters,
+            "final_val_loss": losses["val"],
+            "flops_used": flops_used,
+        }
+        torch.save(final_ckpt, os.path.join(args.out_dir, "final.pt"))
+        print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+
+    # Cleanup DDP
+    cleanup_ddp(world_size)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ revealing the "compute-optimal frontier" where larger models reach lower loss bu
 
 Usage:
     python sweep.py
-    python sweep.py --flop_budgets 1e12 3e12 1e13 --n_embds 32 64 128 256
+    python sweep.py --flop_budgets 1e11 3e11 1e12 --n_embds 32 48 64
 
 Example configs:
 
@@ -48,9 +48,31 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from data import load_data, get_batch
 from model import GPT, ModelConfig
+
+
+def setup_ddp():
+    """Initialize DDP if launched via torchrun, otherwise single-GPU/CPU fallback."""
+    if "RANK" in os.environ:
+        dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device = f"cuda:{rank}"
+        torch.cuda.set_device(device)
+    else:
+        rank, world_size = 0, 1
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    return rank, world_size, device
+
+
+def cleanup_ddp(world_size: int):
+    """Clean up DDP process group."""
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 @dataclass
@@ -123,6 +145,8 @@ def train_model(
     warmup_frac: float = 0.1,
     seed: int = 1337,
     verbose: bool = True,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> tuple[SweepResult, list[dict]]:
     """
     Train a single model configuration to a fixed FLOP budget.
@@ -131,8 +155,11 @@ def train_model(
         SweepResult with final metrics, and list of intermediate checkpoints
         for plotting loss curves.
     """
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    is_main = rank == 0
+
+    # Per-rank seed for different batches across GPUs
+    torch.manual_seed(seed + rank)
+    np.random.seed(seed + rank)
 
     # Ensure n_head divides n_embd (use n_head = n_embd // 16, minimum 1)
     n_head = max(1, n_embd // 16)
@@ -150,24 +177,31 @@ def train_model(
     model = GPT(cfg).to(device)
     n_params = model.num_params()
 
-    tokens_per_iter = batch_size * block_size
-    flops_per_iter = model.estimate_flops_per_token() * tokens_per_iter
+    # Wrap model in DDP if using multiple GPUs
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank])
+
+    raw_model = model.module if world_size > 1 else model
+
+    # Scale tokens_per_iter with world_size
+    tokens_per_iter = batch_size * block_size * world_size
+    flops_per_iter = raw_model.estimate_flops_per_token() * tokens_per_iter
     max_iters = max(1, int(flop_budget / flops_per_iter))
     warmup_iters = int(warmup_frac * max_iters)
 
     tokens_trained = max_iters * tokens_per_iter
     tokens_per_param = tokens_trained / n_params if n_params > 0 else 0.0
 
-    # Scale learning rate with model size
-    scaled_lr = get_lr_for_model(n_embd, learning_rate)
+    # Scale learning rate with model size and world size
+    scaled_lr = get_lr_for_model(n_embd, learning_rate) * math.sqrt(world_size)
 
-    if verbose:
+    if verbose and is_main:
         print(
             f"  Model: d={n_embd}, L={n_layer}, h={n_head}, params={n_params:,}, iters={max_iters}, tok/param={tokens_per_param:.1f}, lr={scaled_lr:.2e}"
         )
     scaled_min_lr = min_lr * (scaled_lr / learning_rate)  # Keep same ratio
 
-    optimizer = model.configure_optim(weight_decay=weight_decay, learning_rate=scaled_lr)
+    optimizer = raw_model.configure_optim(weight_decay=weight_decay, learning_rate=scaled_lr)
 
     # Training loop
     t0 = time.time()
@@ -188,14 +222,15 @@ def train_model(
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
 
-            checkpoints.append(
-                {
-                    "iter": it,
-                    "flops": flops_used,
-                    "train_loss": losses["train"],
-                    "val_loss": losses["val"],
-                }
-            )
+            if is_main:
+                checkpoints.append(
+                    {
+                        "iter": it,
+                        "flops": flops_used,
+                        "train_loss": losses["train"],
+                        "val_loss": losses["val"],
+                    }
+                )
 
         # Training step
         x, y = get_batch(train_ds.data, batch_size, block_size, device)
@@ -421,21 +456,21 @@ def plot_scaling_curves(
 
 
 def main():
+    # Setup DDP first
+    rank, world_size, device = setup_ddp()
+    is_main = rank == 0
+
     ap = argparse.ArgumentParser(description="Scaling law sweep")
     ap.add_argument("--data_dir", type=str, default="data/fineweb_gpt2")
     ap.add_argument("--out_dir", type=str, default="sweep_results")
-    ap.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
-    )
+    ap.add_argument("--device", type=str, default=None, help="Device (auto-detected with DDP)")
     ap.add_argument("--seed", type=int, default=1337)
 
-    ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e12, 3e12, 1e13], help="FLOP budgets to sweep")
-    ap.add_argument("--n_embds", type=int, nargs="+", default=[64, 128, 256], help="Embedding dimensions to sweep")
-    ap.add_argument("--n_layers", type=int, nargs="+", default=[2, 4, 6], help="Layer counts to sweep")
-    ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--block_size", type=int, default=128)
+    ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e11, 3e11, 1e12], help="FLOP budgets to sweep")
+    ap.add_argument("--n_embds", type=int, nargs="+", default=[32, 48, 64], help="Embedding dimensions to sweep")
+    ap.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 2], help="Layer counts to sweep")
+    ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--block_size", type=int, default=64)
     ap.add_argument("--eval_iters", type=int, default=50)
 
     args = ap.parse_args()
@@ -447,51 +482,60 @@ def main():
     block_size = args.block_size
     eval_iters = args.eval_iters
 
-    print(f"Device: {args.device}")
-    print(f"FLOP budgets: [{', '.join(f'{b:.0e}' for b in flop_budgets)}]")
-    print(f"n_embds: {n_embds}")
-    print(f"n_layers: {n_layers}")
+    if is_main:
+        print(f"Device: {device}")
+        if world_size > 1:
+            print(f"World size: {world_size} GPUs")
+        print(f"FLOP budgets: [{', '.join(f'{b:.0e}' for b in flop_budgets)}]")
+        print(f"n_embds: {n_embds}")
+        print(f"n_layers: {n_layers}")
 
     train_ds, val_ds = load_data(args.data_dir)
-    print(f"Loaded data: {len(train_ds):,} train tokens, vocab_size={train_ds.vocab_size}")
-
-    os.makedirs(args.out_dir, exist_ok=True)
+    if is_main:
+        print(f"Loaded data: {len(train_ds):,} train tokens, vocab_size={train_ds.vocab_size}")
+        os.makedirs(args.out_dir, exist_ok=True)
 
     all_results: list[SweepResult] = []
     all_checkpoints: dict[tuple[int, int], list[dict]] = {}
 
+    # Only rank 0 handles CSV writing
+    csv_file = None
+    csv_writer = None
     csv_path = os.path.join(args.out_dir, "results.csv")
-    csv_file = open(csv_path, "w", newline="")
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(
-        [
-            "flop_budget",
-            "n_embd",
-            "n_layer",
-            "n_head",
-            "n_params",
-            "flops_used",
-            "tokens_trained",
-            "num_iters",
-            "tokens_per_param",
-            "final_train_loss",
-            "final_val_loss",
-            "best_val_loss",
-            "train_time_sec",
-        ]
-    )
+    if is_main:
+        csv_file = open(csv_path, "w", newline="")
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(
+            [
+                "flop_budget",
+                "n_embd",
+                "n_layer",
+                "n_head",
+                "n_params",
+                "flops_used",
+                "tokens_trained",
+                "num_iters",
+                "tokens_per_param",
+                "final_train_loss",
+                "final_val_loss",
+                "best_val_loss",
+                "train_time_sec",
+            ]
+        )
 
     total_runs = len(flop_budgets) * len(n_embds)
     run_idx = 0
 
     for flop_budget in flop_budgets:
-        print(f"\n{'=' * 60}")
-        print(f"FLOP Budget: {flop_budget:.2e}")
-        print(f"{'=' * 60}")
+        if is_main:
+            print(f"\n{'=' * 60}")
+            print(f"FLOP Budget: {flop_budget:.2e}")
+            print(f"{'=' * 60}")
 
         for n_embd, n_layer in zip(n_embds, n_layers):
             run_idx += 1
-            print(f"\n[{run_idx}/{total_runs}] Training d={n_embd}, L={n_layer} @ {flop_budget:.0e} FLOPs")
+            if is_main:
+                print(f"\n[{run_idx}/{total_runs}] Training d={n_embd}, L={n_layer} @ {flop_budget:.0e} FLOPs")
 
             result, checkpoints = train_model(
                 n_embd=n_embd,
@@ -501,9 +545,11 @@ def main():
                 val_ds=val_ds,
                 batch_size=batch_size,
                 block_size=block_size,
-                device=args.device,
+                device=device,
                 eval_iters=eval_iters,
                 seed=args.seed,
+                rank=rank,
+                world_size=world_size,
             )
 
             all_results.append(result)
@@ -512,40 +558,46 @@ def main():
             key = (n_embd, n_layer)
             all_checkpoints[key] = checkpoints
 
-            csv_writer.writerow(
-                [
-                    result.flop_budget,
-                    result.n_embd,
-                    result.n_layer,
-                    result.n_head,
-                    result.n_params,
-                    result.flops_used,
-                    result.tokens_trained,
-                    result.num_iters,
-                    f"{result.tokens_per_param:.1f}",
-                    result.final_train_loss,
-                    result.final_val_loss,
-                    result.best_val_loss,
-                    result.train_time_sec,
-                ]
-            )
-            csv_file.flush()
+            if is_main:
+                csv_writer.writerow(
+                    [
+                        result.flop_budget,
+                        result.n_embd,
+                        result.n_layer,
+                        result.n_head,
+                        result.n_params,
+                        result.flops_used,
+                        result.tokens_trained,
+                        result.num_iters,
+                        f"{result.tokens_per_param:.1f}",
+                        result.final_train_loss,
+                        result.final_val_loss,
+                        result.best_val_loss,
+                        result.train_time_sec,
+                    ]
+                )
+                csv_file.flush()
+                print(f"  -> val_loss={result.best_val_loss:.4f}, tok/param={result.tokens_per_param:.1f}, time={result.train_time_sec:.1f}s")
 
-            print(f"  -> val_loss={result.best_val_loss:.4f}, tok/param={result.tokens_per_param:.1f}, time={result.train_time_sec:.1f}s")
+    if is_main:
+        csv_file.close()
+        print(f"\nResults saved to {csv_path}")
 
-    csv_file.close()
-    print(f"\nResults saved to {csv_path}")
+    # Only rank 0 handles plotting and summary
+    if is_main:
+        plot_scaling_curves(all_results, all_checkpoints, args.out_dir)
 
-    plot_scaling_curves(all_results, all_checkpoints, args.out_dir)
+        print("\n" + "=" * 100)
+        print("SUMMARY")
+        print("=" * 100)
+        print(f"{'Config':<20} {'Params':>10} {'FLOPs':>12} {'Tok/Param':>10} {'Val Loss':>10}")
+        print("-" * 100)
+        for r in sorted(all_results, key=lambda x: (x.n_params, x.flop_budget)):
+            cfg = f"d{r.n_embd}_L{r.n_layer}"
+            print(f"{cfg:<20} {r.n_params:>10,} {r.flops_used:>12.2e} {r.tokens_per_param:>10.1f} {r.best_val_loss:>10.4f}")
 
-    print("\n" + "=" * 100)
-    print("SUMMARY")
-    print("=" * 100)
-    print(f"{'Config':<20} {'Params':>10} {'FLOPs':>12} {'Tok/Param':>10} {'Val Loss':>10}")
-    print("-" * 100)
-    for r in sorted(all_results, key=lambda x: (x.n_params, x.flop_budget)):
-        cfg = f"d{r.n_embd}_L{r.n_layer}"
-        print(f"{cfg:<20} {r.n_params:>10,} {r.flops_used:>12.2e} {r.tokens_per_param:>10.1f} {r.best_val_loss:>10.4f}")
+    # Cleanup DDP
+    cleanup_ddp(world_size)
 
 
 if __name__ == "__main__":
