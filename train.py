@@ -305,7 +305,7 @@ def main():
         # Final generation sample
         print("\n=== Sample Generation ===")
         raw_model.eval()
-        prompt = "ROMEO:"
+        prompt = "The "
         ids = train_ds.encode(prompt)
         x = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
         with torch.no_grad():
