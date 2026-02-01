@@ -102,6 +102,11 @@ def estimate_loss(model, train_data, val_data, batch_size, block_size, device, e
     return out
 
 
+def get_lr_for_model(n_embd: int, base_lr: float = 1e-3) -> float:
+    """Scale learning rate with model size: LR ∝ sqrt(n_embd / 128)."""
+    return base_lr * math.sqrt(n_embd / 128)
+
+
 def train_model(
     n_embd: int,
     n_layer: int,
@@ -154,9 +159,15 @@ def train_model(
     tokens_per_param = tokens_trained / n_params if n_params > 0 else 0.0
 
     if verbose:
-        print(f"  Model: d={n_embd}, L={n_layer}, h={n_head}, params={n_params:,}, iters={max_iters}, tok/param={tokens_per_param:.1f}")
+        print(
+            f"  Model: d={n_embd}, L={n_layer}, h={n_head}, params={n_params:,}, iters={max_iters}, tok/param={tokens_per_param:.1f}, lr={scaled_lr:.2e}"
+        )
 
-    optimizer = model.configure_optim(weight_decay=weight_decay, learning_rate=learning_rate)
+    # Scale learning rate with model size
+    scaled_lr = get_lr_for_model(n_embd, learning_rate)
+    scaled_min_lr = min_lr * (scaled_lr / learning_rate)  # Keep same ratio
+
+    optimizer = model.configure_optim(weight_decay=weight_decay, learning_rate=scaled_lr)
 
     # Training loop
     t0 = time.time()
@@ -167,7 +178,7 @@ def train_model(
     eval_interval = max(1, max_iters // 10)
 
     for it in range(1, max_iters + 1):
-        lr = get_lr(it - 1, warmup_iters, max_iters, learning_rate, min_lr)
+        lr = get_lr(it - 1, warmup_iters, max_iters, scaled_lr, scaled_min_lr)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
