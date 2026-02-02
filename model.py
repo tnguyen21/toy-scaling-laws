@@ -127,17 +127,34 @@ class GPT(nn.Module):
             idx = torch.cat((idx, next_id), dim=1)
         return idx
 
-    def num_params(self, non_embedding: bool = True) -> int:
-        n = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n -= self.wpe.weight.numel()
-        return n
+    def num_params(self) -> int:
+        """All parameters including embeddings (for scaling law plots)."""
+        return sum(p.numel() for p in self.parameters())
 
-    def estimate_flops_per_token(self) -> int:
-        """Estimate FLOPs per token using the 6ND approximation."""
-        # For a forward pass: ~2 * N * D where N = non-embedding params, D = 1 token
-        # For forward + backward: ~6 * N * D
-        return 6 * self.num_params(non_embedding=True)
+    def estimate_flops_per_token(self, sequence_len: int | None = None) -> int:
+        """
+        Estimate FLOPs per token for forward + backward pass.
+
+        - Each matmul weight contributes 6 FLOPs (2 forward, 4 backward)
+        - Excludes embedding lookup (not compute, just memory access)
+        - Includes attention key @ query matmul: 12 * l * h * q * t
+
+        Ref: https://arxiv.org/abs/2204.02311 (PaLM paper)
+        Ref: Karpathy's nanochat
+        """
+        if sequence_len is None:
+            sequence_len = self.cfg.block_size
+
+        # All params except token embeddings (wte)
+        nparams = sum(p.numel() for p in self.parameters())
+        nparams_embedding = self.wte.weight.numel()
+
+        # Attention QK matmul term: 12 * n_layer * n_head * head_dim * seq_len
+        n_layer = self.cfg.n_layer
+        n_head = self.cfg.n_head
+        head_dim = self.cfg.n_embd // self.cfg.n_head
+
+        return 6 * (nparams - nparams_embedding) + 12 * n_layer * n_head * head_dim * sequence_len
 
     def configure_optim(self, weight_decay: float, learning_rate: float, betas: tuple[float, float] = (0.9, 0.95)):
         decay, no_decay = [], []
