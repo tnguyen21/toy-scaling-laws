@@ -168,7 +168,7 @@ def main():
     ap.add_argument("--results", type=str, required=True, help="Path to sweep results.csv")
     ap.add_argument("--flop_budget", type=float, required=True, help="FLOP budget to validate at")
     ap.add_argument("--dim_mult", type=int, default=32, help="Multiplier for depth -> n_embd")
-    ap.add_argument("--data_dir", type=str, default="data/fineweb_gpt2", help="Data directory")
+    ap.add_argument("--data_dir", type=str, default="data/fineweb_char", help="Data directory")
     ap.add_argument("--batch_size", type=int, default=64, help="Batch size")
     ap.add_argument("--block_size", type=int, default=128, help="Context length")
     ap.add_argument("--out_dir", type=str, default="validate_out", help="Output directory")
