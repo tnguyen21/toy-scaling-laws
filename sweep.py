@@ -7,31 +7,21 @@ revealing the "compute-optimal frontier" where larger models reach lower loss bu
 
 Usage:
     python sweep.py
-    python sweep.py --flop_budgets 1e14 3e14 1e15 --n_embds 64 96 128 192 256
+    python sweep.py --flop_budgets 1e14 3e14 1e15 --depths 1 2 3 4 5 6 8
+
+    Model size is controlled by depth: n_embd = depth * dim_mult, n_layer = depth.
+    Default dim_mult=32, so depth=4 gives n_embd=128, n_layer=4.
 
 Example configs:
 
-    # Small: ~100K-1M params, shows clear U-shaped isoFLOP curves
-    # Note: budgets < 1e13 don't show meaningful scaling behavior
-    # flop_budgets: [1e13, 3e13, 1e14]
-    # n_embds: [32, 48, 64, 96, 128]
-    # n_layers: [2, 2, 2, 4, 4]
-    # batch_size: 64, block_size: 256, eval_iters: 50
+    # Small: depths 1-6, ~8K-600K params
+    python sweep.py --flop_budgets 1e13 3e13 1e14 --depths 1 2 3 4 5 6 --batch_size 64 --block_size 256
 
-    # Medium: ~1M-10M params, 2 OOM FLOP sweep
-    # Model sizes: d=128 (~1M), d=192 (~2M), d=256 (~5M), d=320 (~7M), d=384 (~10M)
-    # flop_budgets: [1e14, 3e14, 1e15, 3e15, 1e16]
-    # n_embds: [128, 192, 256, 320, 384]
-    # n_layers: [4, 4, 6, 6, 6]
-    # batch_size: 64, block_size: 256, eval_iters: 50
+    # Medium: depths 2-10, ~25K-3M params
+    python sweep.py --flop_budgets 1e14 3e14 1e15 --depths 2 3 4 5 6 8 10 --batch_size 64 --block_size 256
 
-    uv run sweep.py --flop_budgets 1e15 3e15 1e16 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256 --eval_iters 50
-
-    # Large: ~60M-240M params
-    # flop_budgets: [1e16, 3e16, 1e17]
-    # n_embds: [640, 768, 896, 1024, 1280]
-    # n_layers: [6, 6, 6, 6, 6]
-    # batch_size: 64, block_size: 1024, eval_iters: 100
+    # Large: depths 4-12, ~100K-10M params (use dim_mult=64 for wider models)
+    python sweep.py --flop_budgets 1e15 3e15 1e16 --depths 4 6 8 10 12 --dim_mult 64 --batch_size 64 --block_size 256
 """
 
 from __future__ import annotations
@@ -511,8 +501,10 @@ def main():
     ap.add_argument("--seed", type=int, default=1337)
 
     ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e13, 3e13, 1e14], help="FLOP budgets to sweep")
-    ap.add_argument("--n_embds", type=int, nargs="+", default=[32, 48, 64, 96, 128], help="Embedding dimensions to sweep")
-    ap.add_argument("--n_layers", type=int, nargs="+", default=[2, 2, 2, 4, 4], help="Layer counts to sweep")
+    ap.add_argument("--depths", type=int, nargs="+", default=None, help="Model depths (n_embd = depth * dim_mult, n_layer = depth)")
+    ap.add_argument("--dim_mult", type=int, default=32, help="Multiplier for depth -> n_embd (default: 32)")
+    ap.add_argument("--n_embds", type=int, nargs="+", default=None, help="Override: embedding dimensions")
+    ap.add_argument("--n_layers", type=int, nargs="+", default=None, help="Override: layer counts")
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--block_size", type=int, default=64)
     ap.add_argument("--eval_iters", type=int, default=50)
@@ -520,8 +512,20 @@ def main():
     args = ap.parse_args()
 
     flop_budgets = args.flop_budgets
-    n_embds = args.n_embds
-    n_layers = args.n_layers
+
+    # Derive n_embds/n_layers from depths, or use explicit overrides
+    if args.depths is not None:
+        depths = args.depths
+        n_embds = [d * args.dim_mult for d in depths]
+        n_layers = depths
+    elif args.n_embds is not None and args.n_layers is not None:
+        n_embds = args.n_embds
+        n_layers = args.n_layers
+    else:
+        # Default: depths 1-4
+        depths = [1, 2, 2, 3, 4]
+        n_embds = [d * args.dim_mult for d in depths]
+        n_layers = depths
     batch_size = args.batch_size
     block_size = args.block_size
     eval_iters = args.eval_iters
