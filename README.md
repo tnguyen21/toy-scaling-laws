@@ -67,7 +67,7 @@ torchrun --nproc_per_node=8 train.py --flop_budget 1e15
 torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e13 3e13 1e14 --n_embds 32 48 64 96 128 --n_layers 2 2 2 4 4 --batch_size 64 --block_size 128
 
 # Medium sweep (clearer scaling, higher compute)
-torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e14 3e14 6e14 --n_embds 8 16 32 64 96 128 192  --n_layers 1 1 1 2 4 4 6  --batch_size 128 --block_size 128
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 3e13 6e13 1e14 --n_embds 8 16 32 32 64 96 128  --n_layers 1 1 1 2 2 4 4 --batch_size 128 --block_size 128
 
 # Large sweep (production-scale)
 torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e15 3e15 1e16 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256
@@ -80,9 +80,29 @@ With DDP:
 - Each GPU gets different random batches (per-rank seeding)
 - Only rank 0 prints, saves checkpoints, and writes results
 
+## Validating Scaling Laws
+
+After running a sweep, test if your fitted scaling laws actually predict:
+
+```bash
+# Show predictions for a new FLOP budget (dry run)
+python validate.py --results sweep_results/results.csv --flop_budget 2e14 --dry_run
+
+# Train and measure prediction error
+python validate.py --results sweep_results/results.csv --flop_budget 2e14
+```
+
+The script will:
+1. Fit power laws from your sweep results (N_opt ∝ C^α, L_opt ∝ C^β)
+2. Predict optimal model size and expected loss for the new budget
+3. Train at that budget and report prediction error
+
+A good fit should have <10% prediction error.
+
 ## Files
 
 - `model.py` — minimal GPT (attention, MLP, embeddings)
 - `data.py` — data prep and loading (GPT-2 tokenization from FineWeb)
 - `train.py` — training loop with FLOP targeting
 - `sweep.py` — scaling law experiments across model sizes
+- `validate.py` — test scaling law predictions at new FLOP budgets
