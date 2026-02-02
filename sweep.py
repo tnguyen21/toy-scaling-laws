@@ -489,7 +489,7 @@ def main():
     is_main = rank == 0
 
     ap = argparse.ArgumentParser(description="Scaling law sweep")
-    ap.add_argument("--data_dir", type=str, default="data/fineweb_gpt2")
+    ap.add_argument("--data_dir", type=str, default="data/fineweb_char")
     ap.add_argument("--out_dir", type=str, default="sweep_results")
     ap.add_argument("--device", type=str, default=None, help="Device (auto-detected with DDP)")
     ap.add_argument("--seed", type=int, default=1337)
