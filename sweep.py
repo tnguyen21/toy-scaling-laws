@@ -267,11 +267,15 @@ def train_model(
     return result, checkpoints
 
 
-def find_optimal_interpolated(params: list, losses: list) -> tuple[float, float]:
-    """Fit parabola to log(params) vs loss, return interpolated optimum."""
+def fit_isoflop_parabola(params: list, losses: list) -> tuple[np.ndarray | None, float, float]:
+    """
+    Fit parabola to log(params) vs loss.
+    Returns (coeffs, optimal_params, optimal_loss) where coeffs can be used to plot the curve.
+    coeffs is None if fitting fails.
+    """
     if len(params) < 3:
         min_idx = np.argmin(losses)
-        return float(params[min_idx]), float(losses[min_idx])
+        return None, float(params[min_idx]), float(losses[min_idx])
 
     log_params = np.log(np.array(params))
     losses_arr = np.array(losses)
@@ -282,14 +286,14 @@ def find_optimal_interpolated(params: list, losses: list) -> tuple[float, float]
 
     if a <= 0:  # No minimum (parabola opens down)
         min_idx = np.argmin(losses_arr)
-        return float(params[min_idx]), float(losses_arr[min_idx])
+        return None, float(params[min_idx]), float(losses_arr[min_idx])
 
     # Minimum at log(N) = -b/(2a)
     log_opt = np.clip(-b / (2 * a), log_params.min(), log_params.max())
     opt_params = float(np.exp(log_opt))
     opt_loss = float(np.polyval(coeffs, log_opt))
 
-    return opt_params, opt_loss
+    return coeffs, opt_params, opt_loss
 
 
 def plot_scaling_curves(
@@ -402,22 +406,36 @@ def plot_scaling_curves(
 
             color = flop_colors[i]
             label = f"{flop_budget:.0e}"
-            ax.plot(params, losses, "o--", color=color, label=label, markersize=8, alpha=0.8)
 
-            # Find and mark optimal point (interpolated minimum)
-            if losses:
-                optimal_params, optimal_loss = find_optimal_interpolated(params, losses)
-                ax.scatter(
-                    [optimal_params],
-                    [optimal_loss],
-                    color=color,
-                    s=200,
-                    marker="*",
-                    zorder=10,
-                    edgecolors="black",
-                    linewidths=0.5,
-                )
-                optimal_points.append((flop_budget, optimal_params, optimal_loss))
+            # Plot data points
+            ax.plot(params, losses, "o", color=color, label=label, markersize=8, alpha=0.8)
+
+            # Fit parabola and plot
+            if len(params) >= 3:
+                coeffs, optimal_params, optimal_loss = fit_isoflop_parabola(params, losses)
+                if coeffs is not None:
+                    # Plot fitted parabola
+                    log_params_smooth = np.linspace(np.log(min(params)), np.log(max(params)), 100)
+                    losses_smooth = np.polyval(coeffs, log_params_smooth)
+                    params_smooth = np.exp(log_params_smooth)
+                    ax.plot(params_smooth, losses_smooth, "--", color=color, alpha=0.6, linewidth=2)
+
+                    # Mark optimal point on the fitted curve
+                    ax.scatter(
+                        [optimal_params],
+                        [optimal_loss],
+                        color=color,
+                        s=200,
+                        marker="*",
+                        zorder=10,
+                        edgecolors="black",
+                        linewidths=0.5,
+                    )
+                    optimal_points.append((flop_budget, optimal_params, optimal_loss))
+            elif losses:
+                # Not enough points to fit, just mark the minimum
+                min_idx = np.argmin(losses)
+                optimal_points.append((flop_budget, params[min_idx], losses[min_idx]))
 
         ax.set_xlabel("Parameters")
         ax.set_ylabel("Validation Loss")
@@ -515,7 +533,7 @@ def main():
         if world_size > 1:
             print(f"World size: {world_size} GPUs")
         print(f"FLOP budgets: [{', '.join(f'{b:.0e}' for b in flop_budgets)}]")
-        print(f"\nModel configs:")
+        print("\nModel configs:")
         print(f"{'n_embd':<8} {'n_layer':<8} {'n_head':<8} {'params':<12}")
         print("-" * 40)
         for n_embd, n_layer in zip(n_embds, n_layers):
