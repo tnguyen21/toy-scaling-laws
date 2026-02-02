@@ -124,9 +124,14 @@ def estimate_loss(model, train_data, val_data, batch_size, block_size, device, e
     return out
 
 
-def get_lr_for_model(n_embd: int, base_lr: float = 1e-3) -> float:
-    """Scale learning rate with model size: LR ∝ 1/sqrt(n_embd / 128)."""
-    return base_lr / math.sqrt(n_embd / 128)
+def get_lr_for_model(n_params: int, base_lr: float = 1e-3, ref_params: int = 1_000_000) -> float:
+    """Scale LR with model size: smaller models get higher LR.
+
+    LR = base_lr * (ref_params / n_params)^0.5
+    Reference: 1M param model gets base_lr.
+    """
+    scale = math.sqrt(ref_params / max(n_params, 1000))
+    return base_lr * min(scale, 10.0)  # Cap at 10x for tiny models
 
 
 def train_model(
@@ -193,7 +198,7 @@ def train_model(
     tokens_per_param = tokens_trained / n_params if n_params > 0 else 0.0
 
     # Scale learning rate with model size and world size
-    scaled_lr = get_lr_for_model(n_embd, learning_rate) * math.sqrt(world_size)
+    scaled_lr = get_lr_for_model(n_params, learning_rate) * math.sqrt(world_size)
 
     if verbose and is_main:
         print(
@@ -262,6 +267,31 @@ def train_model(
     )
 
     return result, checkpoints
+
+
+def find_optimal_interpolated(params: list, losses: list) -> tuple[float, float]:
+    """Fit parabola to log(params) vs loss, return interpolated optimum."""
+    if len(params) < 3:
+        min_idx = np.argmin(losses)
+        return float(params[min_idx]), float(losses[min_idx])
+
+    log_params = np.log(np.array(params))
+    losses_arr = np.array(losses)
+
+    # Fit: loss = a*(log N)^2 + b*(log N) + c
+    coeffs = np.polyfit(log_params, losses_arr, 2)
+    a, b, c = coeffs
+
+    if a <= 0:  # No minimum (parabola opens down)
+        min_idx = np.argmin(losses_arr)
+        return float(params[min_idx]), float(losses_arr[min_idx])
+
+    # Minimum at log(N) = -b/(2a)
+    log_opt = np.clip(-b / (2 * a), log_params.min(), log_params.max())
+    opt_params = float(np.exp(log_opt))
+    opt_loss = float(np.polyval(coeffs, log_opt))
+
+    return opt_params, opt_loss
 
 
 def plot_scaling_curves(
@@ -376,11 +406,9 @@ def plot_scaling_curves(
             label = f"{flop_budget:.0e}"
             ax.plot(params, losses, "o--", color=color, label=label, markersize=8, alpha=0.8)
 
-            # Find and mark optimal point (minimum loss)
+            # Find and mark optimal point (interpolated minimum)
             if losses:
-                min_idx = np.argmin(losses)
-                optimal_params = params[min_idx]
-                optimal_loss = losses[min_idx]
+                optimal_params, optimal_loss = find_optimal_interpolated(params, losses)
                 ax.scatter(
                     [optimal_params],
                     [optimal_loss],

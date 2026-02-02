@@ -66,9 +66,12 @@ torchrun --nproc_per_node=4 sweep.py --flop_budgets 1e14 3e14 1e15
 
 # Multi-node (2 nodes, 8 GPUs each)
 torchrun --nnodes=2 --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=HOST:PORT train.py --flop_budget 1e17
+
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 3e15 1e16 3e16 --n_embds 16 32 64 96 128 192 256 --n_layers 2 2 2 3 4 4 6 --batch_size 128 --block_size 256
 ```
 
 With DDP:
+
 - Batch size scales linearly with GPU count (8 GPUs = 8x batch)
 - Learning rate scales by sqrt(world_size)
 - Each GPU gets different random batches (per-rank seeding)
