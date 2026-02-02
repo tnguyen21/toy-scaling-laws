@@ -64,10 +64,10 @@ Both `train.py` and `sweep.py` support distributed data parallel training via `t
 torchrun --nproc_per_node=8 train.py --flop_budget 1e15
 
 # Small sweep (shows U-curves at lower compute)
-torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e13 3e13 1e14 --n_embds 32 48 64 96 128 --n_layers 2 2 2 4 4 --batch_size 64 --block_size 256
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e13 3e13 1e14 --n_embds 32 48 64 96 128 --n_layers 2 2 2 4 4 --batch_size 64 --block_size 128
 
 # Medium sweep (clearer scaling, higher compute)
-torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e14 3e14 6e14 --n_embds 16 32 64 96 128 192 256 --n_layers 1 1 2 4 4 6 6 --batch_size 128 --block_size 256
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e14 3e14 6e14 --n_embds 8 16 32 64 96 128 192  --n_layers 1 1 1 2 4 4 6  --batch_size 128 --block_size 128
 
 # Large sweep (production-scale)
 torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e15 3e15 1e16 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256
