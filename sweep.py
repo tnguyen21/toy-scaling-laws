@@ -7,30 +7,28 @@ revealing the "compute-optimal frontier" where larger models reach lower loss bu
 
 Usage:
     python sweep.py
-    python sweep.py --flop_budgets 1e11 3e11 1e12 --n_embds 32 48 64
+    python sweep.py --flop_budgets 1e14 3e14 1e15 --n_embds 64 96 128 192 256
 
 Example configs:
 
-    # Tiny: for CPU testing, ~10K-100K params, runs in minutes
-    # flop_budgets: [1e10, 3e10, 1e11, 3e11]
-    # n_embds: [16, 32, 48, 64]
-    # n_layers: [1, 2, 3, 4]
-    # batch_size: 32, block_size: 64, eval_iters: 20
+    # Small: ~100K-1M params, shows clear U-shaped isoFLOP curves
+    # Note: budgets < 1e13 don't show meaningful scaling behavior
+    # flop_budgets: [1e13, 3e13, 1e14]
+    # n_embds: [32, 48, 64, 96, 128]
+    # n_layers: [2, 2, 2, 4, 4]
+    # batch_size: 64, block_size: 256, eval_iters: 50
 
-    # Medium: ~1M-10M params, 1 OOM param sweep
+    # Medium: ~1M-10M params, 2 OOM FLOP sweep
     # Model sizes: d=128 (~1M), d=192 (~2M), d=256 (~5M), d=320 (~7M), d=384 (~10M)
-    # FLOP budgets span 2 OOM to see scaling curves cross
     # flop_budgets: [1e14, 3e14, 1e15, 3e15, 1e16]
     # n_embds: [128, 192, 256, 320, 384]
     # n_layers: [4, 4, 6, 6, 6]
     # batch_size: 64, block_size: 256, eval_iters: 50
 
-    uv run sweep.py --flop_budgets 1e16 3e16 1e17 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256 --eval_iters 50
+    uv run sweep.py --flop_budgets 1e15 3e15 1e16 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256 --eval_iters 50
 
     # Large: ~60M-240M params
-    # FLOP budgets span 1 order of magnitude for visible scaling curves
-    # Model sizes: d=640 (~59M), d=768 (~85M), d=896 (~116M), d=1024 (~151M), d=1280 (~236M)
-    # flop_budgets: [3e16, 1e17, 3e17]
+    # flop_budgets: [1e16, 3e16, 1e17]
     # n_embds: [640, 768, 896, 1024, 1280]
     # n_layers: [6, 6, 6, 6, 6]
     # batch_size: 64, block_size: 1024, eval_iters: 100
@@ -494,9 +492,9 @@ def main():
     ap.add_argument("--device", type=str, default=None, help="Device (auto-detected with DDP)")
     ap.add_argument("--seed", type=int, default=1337)
 
-    ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e11, 3e11, 1e12], help="FLOP budgets to sweep")
-    ap.add_argument("--n_embds", type=int, nargs="+", default=[32, 48, 64], help="Embedding dimensions to sweep")
-    ap.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 2], help="Layer counts to sweep")
+    ap.add_argument("--flop_budgets", type=float, nargs="+", default=[1e13, 3e13, 1e14], help="FLOP budgets to sweep")
+    ap.add_argument("--n_embds", type=int, nargs="+", default=[32, 48, 64, 96, 128], help="Embedding dimensions to sweep")
+    ap.add_argument("--n_layers", type=int, nargs="+", default=[2, 2, 2, 4, 4], help="Layer counts to sweep")
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--block_size", type=int, default=64)
     ap.add_argument("--eval_iters", type=int, default=50)
@@ -510,16 +508,30 @@ def main():
     block_size = args.block_size
     eval_iters = args.eval_iters
 
+    train_ds, val_ds = load_data(args.data_dir)
+
     if is_main:
         print(f"Device: {device}")
         if world_size > 1:
             print(f"World size: {world_size} GPUs")
         print(f"FLOP budgets: [{', '.join(f'{b:.0e}' for b in flop_budgets)}]")
-        print(f"n_embds: {n_embds}")
-        print(f"n_layers: {n_layers}")
-
-    train_ds, val_ds = load_data(args.data_dir)
-    if is_main:
+        print(f"\nModel configs:")
+        print(f"{'n_embd':<8} {'n_layer':<8} {'n_head':<8} {'params':<12}")
+        print("-" * 40)
+        for n_embd, n_layer in zip(n_embds, n_layers):
+            n_head = max(1, n_embd // 16)
+            cfg = ModelConfig(
+                vocab_size=train_ds.vocab_size,
+                block_size=block_size,
+                n_embd=n_embd,
+                n_head=n_head,
+                n_layer=n_layer,
+            )
+            tmp_model = GPT(cfg)
+            n_params = tmp_model.num_params()
+            print(f"{n_embd:<8} {n_layer:<8} {n_head:<8} {n_params:>10,}")
+            del tmp_model
+        print()
         print(f"Loaded data: {len(train_ds):,} train tokens, vocab_size={train_ds.vocab_size}")
         os.makedirs(args.out_dir, exist_ok=True)
 

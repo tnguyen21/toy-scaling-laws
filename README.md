@@ -34,9 +34,9 @@ The key idea: instead of fixing iterations, fix a compute budget. This makes exp
 
 ```bash
 # Same compute, different model sizes
-python train.py --n_embd 32  --n_layer 1 --flop_budget 1e12
-python train.py --n_embd 48  --n_layer 2 --flop_budget 1e12
-python train.py --n_embd 64  --n_layer 2 --flop_budget 1e12
+python train.py --n_embd 64  --n_layer 2 --flop_budget 1e14
+python train.py --n_embd 96  --n_layer 4 --flop_budget 1e14
+python train.py --n_embd 128 --n_layer 4 --flop_budget 1e14
 ```
 
 ## Sweeps
@@ -44,12 +44,14 @@ python train.py --n_embd 64  --n_layer 2 --flop_budget 1e12
 Run a scaling law sweep across model sizes and compute budgets:
 
 ```bash
-# Default sweep
+# Default sweep (1e13-1e14 range shows clear U-shaped isoFLOP curves)
 python sweep.py
 
 # Custom sweep
-python sweep.py --flop_budgets 1e11 3e11 1e12 --n_embds 32 48 64
+python sweep.py --flop_budgets 1e15 3e15 1e1 --n_embds 64 96 128 192 256
 ```
+
+**Note:** FLOP budgets below ~1e13 don't show meaningful scaling behavior for character-level models.
 
 Results are saved to `sweep_results/` with plots and a CSV.
 
@@ -59,15 +61,16 @@ Both `train.py` and `sweep.py` support distributed data parallel training via `t
 
 ```bash
 # Train on 8 GPUs
-torchrun --nproc_per_node=8 train.py --flop_budget 1e16
+torchrun --nproc_per_node=8 train.py --flop_budget 1e15
 
-# Sweep on 4 GPUs
-torchrun --nproc_per_node=4 sweep.py --flop_budgets 1e14 3e14 1e15
+# Small sweep (shows U-curves at lower compute)
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e13 3e13 1e14 --n_embds 32 48 64 96 128 --n_layers 2 2 2 4 4 --batch_size 64 --block_size 256
 
-# Multi-node (2 nodes, 8 GPUs each)
-torchrun --nnodes=2 --nproc_per_node=8 --rdzv_backend=c10d --rdzv_endpoint=HOST:PORT train.py --flop_budget 1e17
+# Medium sweep (clearer scaling, higher compute)
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e15 3e15 1e16 --n_embds 32 64 96 128 192 256 --n_layers 1 2 4 4 6 6 --batch_size 128 --block_size 256
 
-torchrun --nproc_per_node=8 sweep.py --flop_budgets 3e15 1e16 3e16 --n_embds 16 32 64 96 128 192 256 --n_layers 2 2 2 3 4 4 6 --batch_size 128 --block_size 256
+# Large sweep (production-scale)
+torchrun --nproc_per_node=8 sweep.py --flop_budgets 1e15 3e15 1e16 --n_embds 128 192 256 320 384 --n_layers 4 4 6 6 6 --batch_size 64 --block_size 256
 ```
 
 With DDP:
