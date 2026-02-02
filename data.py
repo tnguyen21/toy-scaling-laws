@@ -1,4 +1,4 @@
-"""Text data loading with GPT-2 BPE encoding from FineWeb."""
+"""Text data loading with character-level encoding from FineWeb."""
 
 from __future__ import annotations
 
@@ -7,30 +7,26 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import tiktoken
 import torch
-from datasets import load_dataset
-
-# GPT-2 encoding (50257 tokens)
-GPT2_VOCAB_SIZE = 50257
 
 
 @dataclass
 class TokenDataset:
-    """Memory-mapped token dataset with tiktoken GPT-2 encoding."""
+    """Memory-mapped token dataset with character-level encoding."""
 
     data: np.memmap
     vocab_size: int
-    encoding: tiktoken.Encoding
+    stoi: dict[str, int]
+    itos: dict[int, str]
 
     def __len__(self) -> int:
         return len(self.data)
 
     def encode(self, text: str) -> list[int]:
-        return self.encoding.encode(text)
+        return [self.stoi.get(c, 0) for c in text]
 
     def decode(self, ids: list[int]) -> str:
-        return self.encoding.decode(ids)
+        return "".join(self.itos.get(i, "") for i in ids)
 
 
 def load_data(data_dir: str) -> tuple[TokenDataset, TokenDataset]:
@@ -42,13 +38,14 @@ def load_data(data_dir: str) -> tuple[TokenDataset, TokenDataset]:
         meta = json.load(f)
 
     vocab_size = meta["vocab_size"]
-    enc = tiktoken.get_encoding("gpt2")
+    stoi = meta["stoi"]
+    itos = {int(k): v for k, v in meta["itos"].items()}
 
     train_data = np.memmap(data_dir / "train.bin", dtype=np.uint16, mode="r")
     val_data = np.memmap(data_dir / "val.bin", dtype=np.uint16, mode="r")
 
-    train_ds = TokenDataset(data=train_data, vocab_size=vocab_size, encoding=enc)
-    val_ds = TokenDataset(data=val_data, vocab_size=vocab_size, encoding=enc)
+    train_ds = TokenDataset(data=train_data, vocab_size=vocab_size, stoi=stoi, itos=itos)
+    val_ds = TokenDataset(data=val_data, vocab_size=vocab_size, stoi=stoi, itos=itos)
 
     return train_ds, val_ds
 
@@ -72,10 +69,11 @@ def get_batch(
 if __name__ == "__main__":
     import argparse
 
+    from datasets import load_dataset
     from tqdm import tqdm
 
-    ap = argparse.ArgumentParser(description="Prepare FineWeb data for training (GPT-2 BPE)")
-    ap.add_argument("--out_dir", type=str, default="data/fineweb_gpt2", help="Output directory")
+    ap = argparse.ArgumentParser(description="Prepare FineWeb data for training (character-level)")
+    ap.add_argument("--out_dir", type=str, default="data/fineweb_char", help="Output directory")
     ap.add_argument("--dataset", type=str, default="HuggingFaceFW/fineweb", help="HuggingFace dataset")
     ap.add_argument("--name", type=str, default="sample-10BT", help="Dataset config name")
     ap.add_argument("--split", type=str, default="train", help="Dataset split")
@@ -100,21 +98,33 @@ if __name__ == "__main__":
     print(f"Loading {args.dataset}/{args.name} (streaming)...")
     ds = load_dataset(args.dataset, args.name, split=args.split, streaming=True)
 
-    # Initialize GPT-2 tokenizer
-    enc = tiktoken.get_encoding("gpt2")
-    print(f"Using GPT-2 BPE encoding (vocab_size={GPT2_VOCAB_SIZE})")
+    # First pass: collect all characters
+    print("Pass 1: collecting characters...")
+    chars: set[str] = set()
+    texts: list[str] = []
 
-    # Single pass: encode all documents
-    print("Encoding documents...")
-    all_ids: list[int] = []
-
-    for i, ex in enumerate(tqdm(ds, total=args.num_docs, desc="encoding")):
+    for i, ex in enumerate(tqdm(ds, total=args.num_docs, desc="scanning")):
         if i >= args.num_docs:
             break
         text = ex.get(args.text_field, "")
         if not isinstance(text, str) or not text:
             continue
-        all_ids.extend(enc.encode(text))
+        texts.append(text)
+        chars.update(text)
+
+    # Build vocabulary
+    chars_sorted = sorted(chars)
+    vocab_size = len(chars_sorted)
+    stoi = {c: i for i, c in enumerate(chars_sorted)}
+    itos = {i: c for i, c in enumerate(chars_sorted)}
+
+    print(f"Character vocabulary: {vocab_size} unique characters")
+
+    # Second pass: encode all text
+    print("Pass 2: encoding...")
+    all_ids: list[int] = []
+    for text in tqdm(texts, desc="encoding"):
+        all_ids.extend(stoi[c] for c in text)
 
     # Split into train/val
     ids = np.array(all_ids, dtype=np.uint16)
@@ -128,13 +138,15 @@ if __name__ == "__main__":
     val_arr.tofile(val_path)
 
     meta = {
-        "encoding": "gpt2",
+        "encoding": "char",
         "dataset": args.dataset,
         "name": args.name,
-        "num_docs": args.num_docs,
-        "vocab_size": GPT2_VOCAB_SIZE,
+        "num_docs": len(texts),
+        "vocab_size": vocab_size,
         "train_tokens": len(train_arr),
         "val_tokens": len(val_arr),
+        "stoi": stoi,
+        "itos": itos,
     }
 
     with open(meta_path, "w") as f:
@@ -142,4 +154,4 @@ if __name__ == "__main__":
 
     print(f"Wrote {train_path} ({len(train_arr):,} tokens)")
     print(f"Wrote {val_path} ({len(val_arr):,} tokens)")
-    print(f"Wrote {meta_path} (vocab_size={GPT2_VOCAB_SIZE})")
+    print(f"Wrote {meta_path} (vocab_size={vocab_size})")
