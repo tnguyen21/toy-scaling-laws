@@ -38,12 +38,12 @@ def fit_power_laws(df: pd.DataFrame) -> dict:
     # Group by FLOP budget, find optimal N (min loss) at each
     optima = []
     for flop_budget, grp in df.groupby("flop_budget"):
-        best = grp.loc[grp["loss"].idxmin()]
+        best = grp.loc[grp["final_val_loss"].idxmin()]
         optima.append(
             {
                 "C": flop_budget,
                 "N_opt": best["n_params"],
-                "L_opt": best["loss"],
+                "L_opt": best["final_val_loss"],
                 "n_embd": best["n_embd"],
                 "n_layer": best["n_layer"],
             }
